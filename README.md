@@ -1,26 +1,28 @@
 <div align="center">
   <p>
-    <a href="https://github.com/telekinesis-ai">
-      <img width="100%" src="assets/telekinesis_banner.png" />
+    <a align="center" href="" target="_blank">
+      <img
+        width="100%"
+        src="https://telekinesis-public-assets.s3.us-east-1.amazonaws.com/Telekinesis+Banner.png"
+      >
     </a>
   </p>
 
   <p align="center">
-    <a href="https://pypi.org/project/telekinesis-ai/">
-      <img src="https://img.shields.io/pypi/v/telekinesis-ai" />
+    <a href="https://pypi.org/project/rlbotics/">
+      <img src="https://img.shields.io/pypi/v/rlbotics" />
     </a>
-    <a href="https://pypi.org/project/telekinesis-ai/">
-      <img src="https://img.shields.io/pypi/pyversions/telekinesis-ai" />
+    <a href="https://pypi.org/project/rlbotics/">
+      <img src="https://img.shields.io/pypi/pyversions/rlbotics" />
     </a>
-    <a href="https://pypi.org/project/telekinesis-ai/">
-      <img src="https://img.shields.io/pypi/l/telekinesis-ai" />
+    <a href="LICENSE">
+      <img src="https://img.shields.io/badge/license-Apache%202.0-blue" />
     </a>
     <a href="https://docs.telekinesis.ai">
       <img src="https://img.shields.io/badge/docs-telekinesis.ai-blue" />
     </a>
   </p>
 
-  <h2>Any robot. Any task. One Physical AI platform.</h2>
 
   <p>
     <a href="https://docs.telekinesis.ai/">Telekinesis Docs</a>
