@@ -94,7 +94,7 @@ jobs:
           done
 
       - name: Verify import
-        run: python -c "import rlbotics; print('Import OK')"
+        run: python -c "import telekinesis.rlbotics; print('Import OK')"
 
   publish-pypi:
     name: Publish to PyPI
