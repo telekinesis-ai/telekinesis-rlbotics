@@ -1,0 +1,12 @@
+InvertedPendulum-v4:
+  action:
+    dim: 1
+    num_classes: '1'
+    shape: (1,)
+    space: box
+  observation:
+    dim: 4
+    is_image_space: false
+    num_classes: '4'
+    shape: (4,)
+    space: box

@@ -1,0 +1,12 @@
+MountainCar-v0:
+  action:
+    dim: 1
+    num_classes: '3'
+    shape: ()
+    space: discrete
+  observation:
+    dim: 2
+    is_image_space: false
+    num_classes: '2'
+    shape: (2,)
+    space: box

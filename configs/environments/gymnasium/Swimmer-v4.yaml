@@ -1,0 +1,12 @@
+Swimmer-v4:
+  action:
+    dim: 2
+    num_classes: '2'
+    shape: (2,)
+    space: box
+  observation:
+    dim: 8
+    is_image_space: false
+    num_classes: '8'
+    shape: (8,)
+    space: box

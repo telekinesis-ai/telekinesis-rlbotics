@@ -1,0 +1,12 @@
+Hopper-v5:
+  action:
+    dim: 3
+    num_classes: '3'
+    shape: (3,)
+    space: box
+  observation:
+    dim: 11
+    is_image_space: false
+    num_classes: '11'
+    shape: (11,)
+    space: box

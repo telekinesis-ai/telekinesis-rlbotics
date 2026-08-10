@@ -1,0 +1,12 @@
+HumanoidStandup-v4:
+  action:
+    dim: 17
+    num_classes: '17'
+    shape: (17,)
+    space: box
+  observation:
+    dim: 376
+    is_image_space: false
+    num_classes: '376'
+    shape: (376,)
+    space: box

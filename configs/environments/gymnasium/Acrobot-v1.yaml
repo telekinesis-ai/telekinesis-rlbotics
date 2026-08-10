@@ -1,0 +1,12 @@
+Acrobot-v1:
+  action:
+    dim: 1
+    num_classes: '3'
+    shape: ()
+    space: discrete
+  observation:
+    dim: 6
+    is_image_space: false
+    num_classes: '6'
+    shape: (6,)
+    space: box

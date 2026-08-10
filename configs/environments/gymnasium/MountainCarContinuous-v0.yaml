@@ -1,0 +1,12 @@
+MountainCarContinuous-v0:
+  action:
+    dim: 1
+    num_classes: '1'
+    shape: (1,)
+    space: box
+  observation:
+    dim: 2
+    is_image_space: false
+    num_classes: '2'
+    shape: (2,)
+    space: box

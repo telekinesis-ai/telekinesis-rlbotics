@@ -1,0 +1,12 @@
+Pusher-v5:
+  action:
+    dim: 7
+    num_classes: '7'
+    shape: (7,)
+    space: box
+  observation:
+    dim: 23
+    is_image_space: false
+    num_classes: '23'
+    shape: (23,)
+    space: box

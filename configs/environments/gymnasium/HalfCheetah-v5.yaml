@@ -1,0 +1,12 @@
+HalfCheetah-v5:
+  action:
+    dim: 6
+    num_classes: '6'
+    shape: (6,)
+    space: box
+  observation:
+    dim: 17
+    is_image_space: false
+    num_classes: '17'
+    shape: (17,)
+    space: box

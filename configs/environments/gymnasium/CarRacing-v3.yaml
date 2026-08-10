@@ -1,0 +1,12 @@
+CarRacing-v3:
+  action:
+    dim: 3
+    num_classes: '3'
+    shape: (3,)
+    space: box
+  observation:
+    dim: 27648
+    is_image_space: true
+    num_classes: '27648'
+    shape: (96, 96, 3)
+    space: box

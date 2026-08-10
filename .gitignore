@@ -1,0 +1,66 @@
+# Python Bytecode Files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+# Anchored to the repository root, so they do not swallow the library's own envs package
+/env/
+/envs/
+*.egg-info/
+*.egg
+*.virtualenv
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# VSCode and JetBrains (IDE) Configurations
+.vscode/
+.idea/
+
+# Python Distribution and Packaging
+*.tar.gz
+*.whl
+*.dist-info/
+*.egg-info/
+build/
+dist/
+eggs/
+*.manifest
+*.spec
+
+# Logs and Databases
+*.log
+*.pot
+*.pyc
+*.sqlite3
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# Tests Output (if any)
+tests/videos/
+tests/__pycache__/
+
+# Custom Exclusions (from your input)
+experiments/
+rlbotics/envs/panda_gripper/parts/
+dev_scripts/
+# TensorBoard runs, checkpoints and animations written by the examples
+logs/
+runs/
+videos/
+
+# MuJoCo drops this in the working directory when a simulation warns
+MUJOCO_LOG.TXT
+
+# Test and lint tooling artifacts. pytest and ruff also drop a .gitignore inside their own cache
+# directories, so those are covered twice over; coverage.py does not.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/

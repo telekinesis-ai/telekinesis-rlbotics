@@ -1,0 +1,12 @@
+FrozenLake8x8-v1:
+  action:
+    dim: 1
+    num_classes: '4'
+    shape: ()
+    space: discrete
+  observation:
+    dim: 1
+    is_image_space: false
+    num_classes: '64'
+    shape: ()
+    space: discrete

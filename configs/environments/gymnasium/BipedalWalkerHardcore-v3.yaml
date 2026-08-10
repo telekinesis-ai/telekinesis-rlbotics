@@ -1,0 +1,12 @@
+BipedalWalkerHardcore-v3:
+  action:
+    dim: 4
+    num_classes: '4'
+    shape: (4,)
+    space: box
+  observation:
+    dim: 24
+    is_image_space: false
+    num_classes: '24'
+    shape: (24,)
+    space: box
