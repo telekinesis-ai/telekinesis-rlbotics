@@ -1,14 +1,16 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = [
+    "setuptools>=61",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rlbotics"
-version = "0.1.1"
+version = "0.1.2"
 description = "Reinforcement Learning package from Telekinesis"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-license = { file = "LICENSE.txt" }
 authors = [
     { name = "Telekinesis GmbH", email = "support@telekinesis.ai" },
 ]
@@ -39,6 +41,9 @@ dependencies = [
     "loguru",
 ]
 
+[project.license]
+file = "LICENSE.txt"
+
 [project.optional-dependencies]
 dev = [
     "ruff==0.15.8",
@@ -47,30 +52,15 @@ dev = [
     "pytest-cov>=5.0.0",
     "pytest-benchmark>=4.0.0",
 ]
-# Needed only by telekinesis.rlbotics.envs.gym_env, the adapter for Gymnasium's tasks. The library
-# itself trains against any VecEnv and never imports gymnasium.
-#   classic-control brings pygame, which Pendulum-v1 needs to render
-#   mujoco brings the physics engine and renderer the MuJoCo tasks need
 gym = [
     "gymnasium[classic-control,mujoco]>=1.0",
 ]
-# Needed only by telekinesis.rlbotics.envs.mjlab_env, the adapter for mjlab's GPU tasks. mjlab picks
-# its physics backend through its own extras, so install "mjlab[cu128]" to train on an NVIDIA GPU or
-# "mjlab[cpu]" on macOS, which mjlab supports for evaluation only.
 mjlab = [
     "mjlab>=1.5",
 ]
-# Needed only by telekinesis.rlbotics.envs.isaaclab_env, the adapter for Isaac Lab's tasks. Isaac Sim
-# is hosted by NVIDIA rather than PyPI, so this extra only resolves with their index:
-#   pip install "telekinesis-rlbotics[isaaclab]" --extra-index-url https://pypi.nvidia.com
-# Isaac Lab needs Python 3.11, Linux (GLIBC 2.35+) or Windows, and an NVIDIA GPU. There is no macOS
-# build.
 isaaclab = [
     "isaaclab[isaacsim,all]>=2.3",
 ]
-# Needed only to run the scripts in examples/, not by the library itself.
-# onnxruntime: runs an exported policy, which is how the examples show deployment
-# imageio: writes the MP4s behind Logger.record_video() and --log-video
 examples = [
     "telekinesis-rlbotics[gym]",
     "onnxruntime",
@@ -82,9 +72,12 @@ Homepage = "https://telekinesis.ai"
 Documentation = "https://docs.telekinesis.ai"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = [
+    "src",
+]
 namespaces = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-
+testpaths = [
+    "tests",
+]
