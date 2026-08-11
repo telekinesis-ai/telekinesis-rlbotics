@@ -1,0 +1,175 @@
+# Annotated reference config (Gymnasium Humanoid-v5) — one line per field, accepted values noted.
+
+env:
+  # Simulator: gymnasium, mjlab, or isaaclab.
+  framework: gymnasium
+
+  # Registered task id for that framework (see configs/<framework>/ for real ones).
+  id: Humanoid-v5
+
+  # Parallel environments. Positive integer.
+  num_envs: 32
+
+  # Device: auto, cpu, mps, cuda, or cuda:<index>.
+  device: auto
+
+  # --- mjlab/isaaclab only; the gymnasium adapter ignores these ---
+  #
+  # clip_actions: symmetric action limit. Positive float; omit to pass actions through unclamped.
+  # clip_actions: 1.0
+  #
+  # nconmax (mjlab only): max contacts MuJoCo Warp allocates for. Positive integer; omit for the task's own limit.
+  # nconmax: 50000
+  #
+  # headless (isaaclab only): run Isaac Sim without a viewer. true or false; default true.
+  # headless: true
+
+runner:
+  # Iterations to train for. Positive integer.
+  num_learning_iterations: 3000
+
+  # Env steps collected per env, per iteration. Positive integer.
+  num_steps_per_env: 32
+
+  # Observation groups per set: gymnasium="observation"; mjlab="actor"/"critic"; isaaclab="policy"/"critic".
+  obs_groups:
+    actor: [observation]
+    critic: [observation]
+
+  # Print progress to console. true or false.
+  verbose: true
+
+  # Check every env output for NaN (costs a GPU sync each step). true or false.
+  check_for_nan: false
+
+  # torch.compile mode: null, default, or max-autotune-no-cudagraphs.
+  torch_compile_mode: null
+
+  logger:
+    # Log at all. true or false; false trains without writing anything.
+    enabled: true
+
+    # Logger class: "Logger", or a "module:Class" import path.
+    log_name: Logger
+
+    # Root directory every experiment is written under. String, or null to write nothing.
+    log_dir: logs
+
+    # Experiment name — the directory grouping this run's siblings: <log_dir>/<experiment>/<timestamp>/.
+    experiment: gymnasium_ppo
+
+    # Console-report interval, in iterations. Positive integer.
+    log_interval: 10
+
+    # Write scalars to the event file. true or false.
+    log_metrics: true
+
+    # Record an MP4 beside every checkpoint. true or false.
+    log_video: true
+
+    # Dump the resolved config as config.json. true or false.
+    log_config: true
+
+    # Checkpoint interval, in iterations. Positive integer.
+    save_interval: 100
+
+    # Checkpoints to keep, oldest deleted first. Non-negative integer; 0 keeps all.
+    keep_last_n: 5
+
+    # Keep model_best.pt, rewritten on every new best mean reward. true or false.
+    save_best: true
+
+    # Resume from: null (scratch), "last", "best", or a checkpoint file name/path.
+    resume: null
+
+  algorithm:
+    # Algorithm class: "PPO", or a "module:Class" import path.
+    class_name: PPO
+
+    # Optimizer: adam, adamw, sgd, or rmsprop.
+    optimizer: adam
+
+    # Initial learning rate. Positive float.
+    learning_rate: 0.0001
+
+    # Optimization epochs per rollout. Positive integer.
+    num_learning_epochs: 2
+
+    # Mini-batches per epoch. Positive integer.
+    num_mini_batches: 4
+
+    # LR schedule: adaptive (KL-based, needs desired_kl) or fixed.
+    schedule: adaptive
+
+    # Target KL for the adaptive schedule. Positive float; required if schedule=adaptive.
+    desired_kl: 0.01
+
+    # PPO clip range. Positive float.
+    clip_param: 0.2
+
+    # Value loss weight. Non-negative float.
+    value_loss_coef: 1.0
+
+    # Clip the value loss too. true or false.
+    use_clipped_value_loss: true
+
+    # Entropy bonus weight. Non-negative float.
+    entropy_coef: 0.0011
+
+    # Discount factor. Float in [0, 1].
+    gamma: 0.99
+
+    # GAE lambda. Float in [0, 1].
+    lam: 0.95
+
+    # Gradient clip norm. Positive float.
+    max_grad_norm: 1.0
+
+    # Normalize advantages per mini-batch instead of over the whole rollout. true or false.
+    normalize_advantage_per_mini_batch: false
+
+    # Critic reuses the actor's CNN encoders. true or false.
+    share_cnn_encoders: false
+
+    # Random Network Distillation settings, or null to disable.
+    rnd_cfg: null
+
+    # Symmetry augmentation/mirror-loss settings, or null to disable (see README's Symmetry section).
+    symmetry_cfg: null
+
+  actor:
+    # Model class: "MLPModel", or a "module:Class" import path.
+    class_name: MLPModel
+
+    # Hidden layer widths. List of positive ints, or -1 to infer a dim from the input.
+    hidden_dims: [256, 256, 128]
+
+    # Activation: relu, elu, selu, crelu, lrelu, leaky_relu, tanh, sigmoid, softplus, gelu, swish, mish, or identity.
+    activation: elu
+
+    # Normalize observations with running statistics before the MLP. true or false.
+    obs_normalization: true
+
+    # What makes the actor stochastic; required on the actor, omit on a deterministic network (see critic).
+    distribution_cfg:
+      # Distribution class: "GaussianDistribution" or "SquashedGaussianDistribution", or a "module:Class" path.
+      class_name: GaussianDistribution
+
+      # Initial std. Positive float within std_range.
+      init_std: 1.0
+
+      # Std clamp [min, max]. min > 0 and min < max.
+      std_range: [0.2, 1.5]
+
+      # Std parameterization: scalar or log.
+      std_type: scalar
+
+      # Std is a learnable parameter, not fixed at init_std. true or false.
+      learn_std: true
+
+  critic:
+    class_name: MLPModel
+    hidden_dims: [256, 256, 128]
+    activation: elu
+    obs_normalization: true
+    # No distribution_cfg: a critic predicts one value rather than sampling an action.

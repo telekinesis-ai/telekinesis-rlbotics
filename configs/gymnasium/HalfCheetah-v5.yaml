@@ -23,7 +23,7 @@ runner:
     save_interval: 100
     keep_last_n: 5
     save_best: true
-    log_video: false
+    log_video: true
     resume: null
 
   algorithm:

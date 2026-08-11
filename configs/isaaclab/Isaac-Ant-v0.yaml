@@ -23,10 +23,10 @@ runner:
     log_dir: logs
     experiment: isaaclab_ppo
     log_interval: 10
-    save_interval: 50
+    save_interval: 100
     keep_last_n: 5
     save_best: true
-    log_video: false
+    log_video: true
     resume: null
 
   algorithm:

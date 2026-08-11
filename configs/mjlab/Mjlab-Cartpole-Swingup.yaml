@@ -22,10 +22,10 @@ runner:
     log_dir: logs
     experiment: mjlab_ppo
     log_interval: 10
-    save_interval: 25
+    save_interval: 100
     keep_last_n: 5
     save_best: true
-    log_video: false
+    log_video: true
     resume: null
 
   algorithm:

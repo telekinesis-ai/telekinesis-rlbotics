@@ -21,6 +21,10 @@ Advanced usage — each option is named after the field it overrides, so ``--num
     python examples/training_example.py configs/gymnasium/Pendulum-v1.yaml \\
         --num-envs 8 --num-learning-iterations 120 --device cpu
 
+Try a config without writing into its own ``logs/`` directory:
+
+    python examples/training_example.py configs/gymnasium/Pendulum-v1.yaml --log-dir /tmp/rlbotics
+
 Resume from the newest checkpoint, or the best scoring one:
 
     python examples/training_example.py configs/gymnasium/Hopper-v5.yaml --resume
@@ -92,6 +96,9 @@ def load_config(
 
     if args.num_learning_iterations is not None:
         runner_data["num_learning_iterations"] = args.num_learning_iterations
+
+    if args.log_dir is not None:
+        runner_data.setdefault("logger", {})["log_dir"] = args.log_dir
 
     if args.resume is not None:
         runner_data.setdefault("logger", {})["resume"] = args.resume
@@ -242,6 +249,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--log-dir",
+        metavar="DIR",
+        help="Where logs, checkpoints and videos go. Overrides runner.logger.log_dir. Handy for a "
+             "quick test run without touching the config's own logs/ directory.",
+    )
+
+    parser.add_argument(
         "--resume",
         nargs="?",
         const="last",
@@ -293,22 +307,24 @@ def main(argv: list[str] | None = None) -> int:
         f"episode_limit={env.max_episode_length}"
     )
 
+    # 3. Create the runner
     runner = OnPolicyRunner(
         env=env,
         runner_cfg=runner_cfg,
         device=str(env.device),
     )
 
-    # 3. Train the policy, for the configured number of iterations
+    # 4. Train the policy
     runner.learn()
 
-    # 4. Export the policy
+    # 5. Export the policy
     policy_path = runner.export()
     logger.info(f"exported policy: {policy_path}")
 
-    # 5. Deploy the exported policy, before the environment is torn down
+    # 6. Deploy the exported policy, before the environment is torn down
     run_inference(policy_path, env, runner_cfg.obs_groups["actor"])
 
+    # 7. Close the environment
     env.close()
     if env_cfg["framework"] == "isaaclab":
         # Isaac Sim does not exit with the environment, and a script that leaves it running hangs
