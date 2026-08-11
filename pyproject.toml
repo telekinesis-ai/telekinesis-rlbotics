@@ -6,7 +6,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rlbotics"
+name = "telekinesis-rlbotics"
 version = "0.1.2"
 description = "Reinforcement Learning package from Telekinesis"
 readme = "README.md"
