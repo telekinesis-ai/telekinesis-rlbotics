@@ -39,14 +39,17 @@ dependencies = [
     "onnx",
     "onnxscript>=0.5.4",
     "loguru",
+    "onnxruntime",
+    "imageio[ffmpeg]",
+    "pyyaml",
 ]
 
 [project.license]
-file = "LICENSE.txt"
+file = "LICENSE"
 
 [project.optional-dependencies]
 dev = [
-    "ruff==0.15.8",
+    "ruff==0.15.9",
     "pylint==4.0.5",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -61,15 +64,13 @@ mjlab = [
 isaaclab = [
     "isaaclab[isaacsim,all]>=2.3",
 ]
-examples = [
-    "telekinesis-rlbotics[gym]",
-    "onnxruntime",
-    "imageio[ffmpeg]",
-]
+
 
 [project.urls]
-Homepage = "https://telekinesis.ai"
-Documentation = "https://docs.telekinesis.ai"
+Homepage = "https://docs.telekinesis.ai/"
+Documentation = "https://docs.telekinesis.ai/skills/rlbotics/overview.html"
+Repository = "https://github.com/telekinesis-ai/telekinesis-rlbotics"
+Issues = "https://github.com/telekinesis-ai/telekinesis-rlbotics/issues"
 
 [tool.setuptools.packages.find]
 where = [

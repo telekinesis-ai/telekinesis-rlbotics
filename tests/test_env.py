@@ -312,9 +312,9 @@ class _FakeEnvCfg:
 class _FakeSimEnv:
     """Stand-in for a manager-based env, with the surface both adapters read.
 
-    The mjlab adapter drives this directly, so it mirrors ManagerBasedRlEnv: observations as a plain
-    dict, termination and truncation reported separately, and no reset on construction. The Isaac Lab
-    adapter goes through Isaac Lab's own wrapper, which is stubbed by ``_FakeRslRlWrapper`` below.
+    Both adapters drive this directly, so it mirrors ManagerBasedRlEnv: observations as a plain dict,
+    termination and truncation reported separately, and no reset on construction. ``unwrapped``
+    stands in for the Gymnasium wrapper chain that ``gym.make`` puts around an Isaac Lab task.
     """
 
     def __init__(self, cfg, device, render_mode=None):
@@ -329,6 +329,10 @@ class _FakeSimEnv:
         self.closed = False
         self.reset_count = 0
         self.stepped_with = None
+
+    @property
+    def unwrapped(self):
+        return self
 
     def _obs(self) -> dict[str, torch.Tensor]:
         return {
@@ -354,52 +358,6 @@ class _FakeSimEnv:
 
     def close(self) -> None:
         self.closed = True
-
-
-class _FakeRslRlWrapper:
-    """Stand-in for Isaac Lab's RslRlVecEnvWrapper, which its adapter still goes through.
-
-    The mjlab adapter drives ``_FakeSimEnv`` directly instead, since it wraps mjlab's environment
-    without mjlab's rsl_rl bridge.
-    """
-
-    def __init__(self, env, clip_actions=None):
-        self.env = env
-        self.clip_actions = clip_actions
-        self.num_envs = env.num_envs
-        self.num_actions = 12
-        self.device = torch.device(env.device)
-        self.max_episode_length = 1000.0
-        self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
-        self.stepped_with = None
-
-    def _obs(self) -> TensorDict:
-        return TensorDict(
-            {
-                group: torch.randn(self.num_envs, dim)
-                for group, dim in self.env.cfg.groups.items()
-            },
-            batch_size=[self.num_envs],
-        )
-
-    def get_observations(self) -> TensorDict:
-        return self._obs()
-
-    def reset(self) -> tuple[TensorDict, dict]:
-        return self._obs(), {}
-
-    def step(self, actions):
-        self.stepped_with = actions
-        # mjlab reports dones as integers and truncations under "time_outs"
-        return (
-            self._obs(),
-            torch.randn(self.num_envs),
-            torch.zeros(self.num_envs, dtype=torch.long),
-            {"time_outs": torch.zeros(self.num_envs, dtype=torch.bool), "log": {}},
-        )
-
-    def close(self) -> None:
-        self.env.closed = True
 
 
 def fake_mjlab(tasks: tuple[str, ...] = ("Mjlab-Velocity-Flat-Unitree-G1",), **cfg_kwargs):
@@ -581,16 +539,20 @@ def fake_isaaclab(
     tasks: tuple[str, ...] = ("Isaac-Velocity-Flat-Anymal-C-v0",),
     groups: dict[str, int] | None = None,
     num_envs: int = 4096,
+    is_finite_horizon: bool = False,
 ):
     """Patch the Isaac Lab pieces the adapter imports with stubs.
 
     Isaac Lab imports its task modules only once Isaac Sim is running, so the adapter defers them to
-    ``_load_isaaclab`` and launches the app first. Both are patched here.
+    ``_load_isaaclab`` and launches the app first. Both are patched here. The adapter drives the task
+    ``gym.make`` returns directly, so the stubbed registry hands back a ``_FakeSimEnv``.
 
     Args:
         tasks: Task ids the stubbed Gymnasium registry knows about.
         groups: Observation groups and their sizes.
         num_envs: Environment count the task config falls back to.
+        is_finite_horizon: Whether the task's horizon is finite, which decides whether the adapter
+            publishes truncations for bootstrapping.
 
     Returns:
         A patch context manager.
@@ -612,14 +574,18 @@ def fake_isaaclab(
     )
 
     def parse_env_cfg(task_name, device="cuda:0", num_envs=None, use_fabric=None):
-        cfg = _FakeEnvCfg(num_envs=num_envs or 4096, groups=groups or {"policy": 48, "critic": 60})
+        cfg = _FakeEnvCfg(
+            num_envs=num_envs or 4096,
+            groups=groups or {"policy": 48, "critic": 60},
+            is_finite_horizon=is_finite_horizon,
+        )
         cfg.device = device
         return cfg
 
     return patch.multiple(
         "telekinesis.rlbotics.envs.isaaclab_env",
         launch_simulator=lambda **kwargs: SimpleNamespace(close=lambda: None),
-        _load_isaaclab=lambda: (gym, parse_env_cfg, _FakeRslRlWrapper),
+        _load_isaaclab=lambda: (gym, parse_env_cfg),
     )
 
 
@@ -657,12 +623,32 @@ class TestIsaacLabVecEnv:
             assert dones.dtype == torch.float32
             assert extras["time_outs"].shape == (8,)
 
-    def test_clip_actions_reaches_isaaclab(self):
-        """Test that action clipping is left to Isaac Lab's own wrapper."""
+    def test_actions_are_clipped_before_the_simulation(self):
+        """Test that clip_actions limits what reaches the task, not just what is recorded."""
         with fake_isaaclab():
-            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu", clip_actions=100.0)
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu", clip_actions=0.5)
+            env.step(torch.full((8, 12), 5.0))
 
-            assert env.venv.clip_actions == 100.0
+            assert env.venv.stepped_with.max() == 0.5
+            assert env.venv.stepped_with.min() == 0.5
+
+    def test_actions_are_passed_through_without_a_clip(self):
+        """Test that no clip means the actions reach the task untouched."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            env.step(torch.full((8, 12), 5.0))
+
+            assert env.venv.stepped_with.max() == 5.0
+
+    def test_a_finite_horizon_task_does_not_bootstrap_time_outs(self):
+        """Test that "time_outs" is only published when the task's horizon is infinite."""
+        with fake_isaaclab(is_finite_horizon=True):
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            _, _, dones, extras = env.step(torch.zeros(8, 12))
+
+            assert "time_outs" not in extras
+            # The truncation still ends the episode, it is just not bootstrapped
+            assert dones[0] == 1.0
 
     def test_episode_length_buf_is_delegated(self):
         """Test that staggering episode lengths reaches the simulation's own counter."""
@@ -694,7 +680,7 @@ class TestIsaacLabVecEnv:
             ):
                 env = IsaacLabVecEnv(self.task, num_envs=4, device="auto")
 
-            assert env.venv.env.device == "cpu"
+            assert env.venv.device == "cpu"
 
     def test_reset_returns_observations_only(self):
         """Test that Isaac Lab's (observations, extras) reset is adapted to the VecEnv contract."""
@@ -711,7 +697,7 @@ class TestIsaacLabVecEnv:
             env = IsaacLabVecEnv(self.task, num_envs=4, device="cpu")
             env.close()
 
-            assert env.venv.env.closed
+            assert env.venv.closed
             assert isaaclab_env._SIMULATION_APP is None
 
     def test_missing_isaaclab_points_at_the_extra(self):

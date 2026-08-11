@@ -1,4 +1,4 @@
-"""Utility functions for RLBotics."""
+"""Shared helpers for resolving callables and devices."""
 
 import importlib
 from collections.abc import Callable

@@ -11,6 +11,7 @@ __pycache__/
 *.egg
 *.virtualenv
 .venv/
+.venv-bare/
 venv/
 ENV/
 env.bak/

@@ -1,4 +1,4 @@
-"""Distribution modules for policy parameterization in reinforcement learning."""
+"""Output distributions for stochastic policies."""
 
 from __future__ import annotations
 

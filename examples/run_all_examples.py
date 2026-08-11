@@ -26,27 +26,27 @@ EXAMPLES_DIR = Path(__file__).parent
 EXCLUDED = {Path(__file__).name}
 
 # An example whose optional dependency is missing exits with this code, so it is reported as skipped
-# rather than as a failure. mjlab_example.py does this, since mjlab needs an NVIDIA GPU.
+# rather than as a failure. training_example.py does this when a configuration asks for a simulator
+# that is not installed, which is expected for mjlab and isaaclab on most machines.
 SKIPPED = 2
 
-# Arguments for examples whose defaults are a real training run rather than a smoke test, keyed by
-# the path relative to this directory
+# Arguments for an example's default run, keyed by its path relative to this directory. Chosen to be
+# a real but cheap training run: train, checkpoint, export, deploy.
 EXAMPLE_ARGS = {
-    # The default task is Humanoid-v5 for 3000 iterations, some 20 minutes. Pendulum on cpu covers
-    # the same path in seconds: train, checkpoint, export, deploy.
-    "gymnasium_example.py": [
-        "-e", "Pendulum-v1", "-n", "8", "-s", "64", "-i", "5", "-d", "cpu",
-        "--hidden-dims", "64,64",
+    "training_example.py": [
+        "configs/gymnasium/Pendulum-v1.yaml", "-i", "5", "-d", "cpu",
     ],
-    # The default task is Unitree G1 locomotion on 4096 environments, which needs a GPU and hours.
-    # Cartpole on cpu covers the same path: train, checkpoint, export, deploy.
-    "mjlab_example.py": [
-        "-t", "Mjlab-Cartpole-Balance", "-n", "8", "-s", "16", "-i", "3",
-        "-d", "cpu", "--hidden-dims", "64,64",
-    ],
-    # Same reasoning: the default is Anymal C locomotion on 4096 environments
-    "isaaclab_example.py": [
-        "-t", "Isaac-Cartpole-v0", "-n", "64", "-s", "16", "-i", "3", "--hidden-dims", "64,64",
+    # Already a short run on Pendulum, so only the iteration count is worth cutting
+    "configuration_example.py": ["-i", "3", "-d", "cpu"],
+}
+
+# training_example.py covers three simulators from one script by reading env.framework out of the
+# configuration, so its default run above (Gymnasium) is not the whole story: it is run once more per
+# entry here, against a task cheap enough to be a smoke test rather than a real training run.
+EXTRA_RUNS = {
+    "training_example.py": [
+        ("mjlab", ["configs/mjlab/Mjlab-Cartpole-Balance.yaml", "-n", "8", "-i", "3", "-d", "cpu"]),
+        ("isaaclab", ["configs/isaaclab/Isaac-Cartpole-v0.yaml", "-n", "64", "-i", "3", "-d", "cpu"]),
     ],
 }
 
@@ -88,11 +88,35 @@ def find_examples(name_filters: list[str] | None = None) -> list[Path]:
     return examples
 
 
-def run_example(path: Path) -> tuple[str, float, str]:
+def find_jobs(name_filters: list[str] | None = None) -> list[tuple[Path, list[str], str]]:
+    """Expand the example scripts into the runs to execute, each with its own arguments and name.
+
+    Most examples run once. One that covers more than one simulator, such as
+    ``training_example.py``, gets one run per :data:`EXTRA_RUNS` entry in addition to its default,
+    since a single pass at the default arguments would leave the other simulators untested.
+
+    Args:
+        name_filters: Forwarded to :func:`find_examples`.
+
+    Returns:
+        Triples of the script to run, the arguments to run it with, and the name to report it under.
+    """
+    jobs = []
+    for path in find_examples(name_filters):
+        name = label(path)
+        jobs.append((path, EXAMPLE_ARGS.get(name, []), name))
+        jobs.extend(
+            (path, args, f"{name} ({variant})") for variant, args in EXTRA_RUNS.get(name, [])
+        )
+    return jobs
+
+
+def run_example(path: Path, args: list[str]) -> tuple[str, float, str]:
     """Run a single example in a subprocess.
 
     Args:
         path: Path to the example script.
+        args: Command-line arguments to run it with.
 
     Returns:
         Its status, one of "PASS", "SKIP" or "FAIL", how long it took in seconds, and its combined
@@ -100,7 +124,7 @@ def run_example(path: Path) -> tuple[str, float, str]:
     """
     start = time.time()
     result = subprocess.run(
-        [sys.executable, str(path), *EXAMPLE_ARGS.get(label(path), [])],
+        [sys.executable, str(path), *args],
         capture_output=True,
         text=True,
         cwd=EXAMPLES_DIR.parent,
@@ -119,19 +143,18 @@ def main(name_filters: list[str] | None = None) -> int:
     Returns:
         Process exit code: 0 if every example passed, 1 otherwise.
     """
-    examples = find_examples(name_filters)
-    if not examples:
+    jobs = find_jobs(name_filters)
+    if not jobs:
         logger.error(f"No examples matched {name_filters}")
         return 1
 
-    logger.info(f"Running {len(examples)} examples")
+    logger.info(f"Running {len(jobs)} examples")
     logger.info("=" * 70)
 
     failures = []
     skipped = []
-    for path in examples:
-        name = label(path)
-        status, duration, output = run_example(path)
+    for path, args, name in jobs:
+        status, duration, output = run_example(path, args)
         if status == "PASS":
             logger.info(f"PASS  {name:<48} {duration:6.1f}s")
         elif status == "SKIP":
@@ -146,10 +169,10 @@ def main(name_filters: list[str] | None = None) -> int:
 
     logger.info("=" * 70)
     if failures:
-        logger.error(f"{len(failures)} of {len(examples)} examples failed: {', '.join(failures)}")
+        logger.error(f"{len(failures)} of {len(jobs)} examples failed: {', '.join(failures)}")
         return 1
 
-    passed = len(examples) - len(skipped)
+    passed = len(jobs) - len(skipped)
     if skipped:
         logger.info(f"All {passed} examples passed, {len(skipped)} skipped: {', '.join(skipped)}")
         return 0

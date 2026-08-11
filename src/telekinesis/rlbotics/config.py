@@ -1,35 +1,21 @@
 """Typed configuration dataclasses for runners, algorithms, models, and distributions.
 
-:class:`~rlbotics.runner.OnPolicyRunner` takes an :class:`OnPolicyRunnerConfig`, which bundles the
-algorithm, actor, and critic configs, and builds the models, the storage, and the algorithm from it.
-Every config validates its own values on construction and converts to and from plain dictionaries
-via :meth:`BaseConfig.to_dict` and :meth:`BaseConfig.from_dict`, so YAML files can be loaded and
-validated too.
+:class:`~telekinesis.rlbotics.runner.OnPolicyRunner` takes an :class:`OnPolicyRunnerConfig`, which
+bundles the algorithm, actor and critic configs. Every config validates itself on construction and
+round-trips through plain dictionaries via :meth:`BaseConfig.to_dict` and
+:meth:`BaseConfig.from_dict`, so YAML files are validated too. See
+``examples/module_examples/config_example.py``.
 
 Attributes:
     ACTIVATIONS: Valid activation function names.
-    OPTIMIZERS: Valid optimizer names, matching :data:`~rlbotics.algorithms.OPTIMIZERS`.
+    OPTIMIZERS: Valid optimizer names, matching :data:`~telekinesis.rlbotics.algorithms.OPTIMIZERS`.
     PADDING_MODES: Valid convolution padding modes. ``"none"`` disables padding.
     NORM_TYPES: Valid convolution normalization types.
     GLOBAL_POOL_TYPES: Valid global pooling types.
     SCHEDULES: Valid learning rate schedules.
     STD_TYPES: Valid standard deviation parameterizations.
-    TORCH_COMPILE_MODES: Valid :func:`torch.compile` modes. CUDA-graph modes are rejected because
-        they are incompatible with the multi-model forward pattern used by the algorithms.
+    TORCH_COMPILE_MODES: Valid :func:`torch.compile` modes, excluding the CUDA-graph ones.
     RESUME_CHOICES: Which checkpoint a resume starts from, the most recent or the best scoring.
-
-Example:
-    Build a runner config and pass it to the runner as a dictionary::
-
-        cfg = OnPolicyRunnerConfig(
-            obs_groups={"actor": ["policy"], "critic": ["policy", "privileged"]},
-            num_steps_per_env=24,
-            save_interval=100,
-            algorithm=PPOConfig(learning_rate=1e-3),
-            actor=MLPConfig(distribution_cfg=GaussianDistributionConfig(init_std=0.5)),
-            critic=MLPConfig(),
-        )
-        runner = OnPolicyRunner(env, cfg, log_dir="logs", device="cuda:0")
 """
 
 from __future__ import annotations
@@ -688,6 +674,9 @@ class OnPolicyRunnerConfig(BaseConfig):
     Attributes:
         obs_groups: Mapping from observation set (``"actor"``, ``"critic"``) to the environment
             observation groups it consumes.
+        num_learning_iterations: Iterations to train for, which
+            :meth:`~telekinesis.rlbotics.runner.OnPolicyRunner.learn` uses when its caller does not
+            say otherwise.
         num_steps_per_env: Environment steps collected per environment per learning iteration.
         verbose: Whether the runner prints training progress. The cadence comes from
             ``logger.log_interval``; this switches the printing on and off.
@@ -704,6 +693,7 @@ class OnPolicyRunnerConfig(BaseConfig):
     """
 
     obs_groups: dict[str, list[str]]
+    num_learning_iterations: int = 1000
     num_steps_per_env: int = 24
     verbose: bool = True
     check_for_nan: bool = False
@@ -722,6 +712,7 @@ class OnPolicyRunnerConfig(BaseConfig):
             ValueError: If any setting is invalid, if ``obs_groups`` is empty or maps a set to an
                 empty list, or if the actor has no ``distribution_cfg``.
         """
+        _check_positive("num_learning_iterations", self.num_learning_iterations)
         _check_positive("num_steps_per_env", self.num_steps_per_env)
 
         if self.torch_compile_mode is not None:

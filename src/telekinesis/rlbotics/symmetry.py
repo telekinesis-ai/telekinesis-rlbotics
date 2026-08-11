@@ -1,12 +1,11 @@
 """Symmetry data augmentation and mirror loss for PPO.
 
-A robot that is left-right symmetric gives the algorithm an invariance for free, and this extension is
-how the algorithm is told about it. Kept in its own module because the mirror function it needs comes
-from outside the library — from whoever knows the robot's joint order — so this is the seam where user
-code meets the update loop.
+A left-right symmetric robot gives the algorithm an invariance for free, and this is how it is told
+about it. It lives in its own module because the mirror function comes from outside the library, from
+whoever knows the robot's joint order.
 
-The settings live in :class:`~telekinesis.rlbotics.config.SymmetryConfig`, and
-:class:`~telekinesis.rlbotics.algorithms.PPO` builds this when one is given.
+Configured by :class:`~telekinesis.rlbotics.config.SymmetryConfig`, and built by
+:class:`~telekinesis.rlbotics.algorithms.PPO` when one is given.
 """
 
 from __future__ import annotations

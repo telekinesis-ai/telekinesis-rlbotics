@@ -299,6 +299,29 @@ class TestOnPolicyRunnerLearn:
 
             assert runner.current_learning_iteration == 4
 
+    def test_checkpoints_record_the_iteration_they_are_named_for(self):
+        """Test that a checkpoint's contents agree with its file name.
+
+        The iteration counter is what ``--resume`` continues from, so a model_<it>.pt that carried
+        <it - 1> inside would silently replay an iteration on every resume.
+        """
+        with tempfile.TemporaryDirectory() as log_dir:
+            env = MockEnvironment(num_envs=2, obs_dim=8, num_actions=2, device="cpu")
+
+            runner = OnPolicyRunner(
+                env=env,
+                runner_cfg=make_runner_cfg(
+                    num_steps_per_env=1, save_interval=1, log_dir=log_dir
+                ),
+                device="cpu",
+            )
+
+            runner.learn(num_learning_iterations=3)
+
+            for iteration in range(3):
+                path = Path(runner.log_dir) / f"model_{iteration}.pt"
+                assert torch.load(path, weights_only=False)["iteration"] == iteration
+
     def test_learn_records_metrics(self):
         """Test that the rollout is counted and the action std is reported."""
         with tempfile.TemporaryDirectory() as log_dir:
