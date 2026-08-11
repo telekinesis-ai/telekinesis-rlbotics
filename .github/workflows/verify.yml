@@ -45,7 +45,7 @@ jobs:
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           echo "Checking version $VERSION for rlbotics"
 
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://pypi.org/pypi/rlbotics/$VERSION/json)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://pypi.org/pypi/telekinesis-rlbotics/$VERSION/json)
 
           if [ "$STATUS" = "200" ]; then
             echo "Version $VERSION already exists on PyPI!"
