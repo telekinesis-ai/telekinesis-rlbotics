@@ -1,17 +1,17 @@
-# Isaac-Reach-Franka-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
+# Isaac-Open-Drawer-Franka-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
 #
 # A starting point for this kind of task, not a measured recipe. Watch Diagnostics/kl.
 
 env:
   framework: isaaclab
-  id: Isaac-Reach-Franka-v0
+  id: Isaac-Open-Drawer-Franka-v0
   num_envs: 2048
   device: auto
   headless: true
 
 runner:
-  num_learning_iterations: 500
-  num_steps_per_env: 16
+  num_learning_iterations: 1500
+  num_steps_per_env: 24
   obs_groups:
     actor: [policy]
     critic: [policy]

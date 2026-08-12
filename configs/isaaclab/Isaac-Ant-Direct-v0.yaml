@@ -1,16 +1,16 @@
-# Isaac-Reach-Franka-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
+# Isaac-Ant-Direct-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
 #
 # A starting point for this kind of task, not a measured recipe. Watch Diagnostics/kl.
 
 env:
   framework: isaaclab
-  id: Isaac-Reach-Franka-v0
-  num_envs: 2048
+  id: Isaac-Ant-Direct-v0
+  num_envs: 4096
   device: auto
   headless: true
 
 runner:
-  num_learning_iterations: 500
+  num_learning_iterations: 1000
   num_steps_per_env: 16
   obs_groups:
     actor: [policy]

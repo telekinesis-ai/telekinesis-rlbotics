@@ -1,26 +1,27 @@
-# Mjlab-Tracking-Flat-Unitree-G1: https://github.com/mujocolab/mjlab
+# Isaac-Humanoid-Direct-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
 #
 # A starting point for this kind of task, not a measured recipe. Watch Diagnostics/kl.
 
 env:
-  framework: mjlab
-  id: Mjlab-Tracking-Flat-Unitree-G1
+  framework: isaaclab
+  id: Isaac-Humanoid-Direct-v0
   num_envs: 4096
   device: auto
+  headless: true
 
 runner:
-  num_learning_iterations: 5000
-  num_steps_per_env: 24
+  num_learning_iterations: 2000
+  num_steps_per_env: 32
   obs_groups:
-    actor: [actor]
-    critic: [critic]
+    actor: [policy]
+    critic: [policy]
   verbose: true
   check_for_nan: false
   torch_compile_mode: null
 
   logger:
     log_dir: logs
-    experiment: mjlab_ppo
+    experiment: isaaclab_ppo
     log_interval: 10
     save_interval: 100
     keep_last_n: 5
@@ -37,7 +38,7 @@ runner:
     schedule: adaptive
     desired_kl: 0.01
     clip_param: 0.2
-    entropy_coef: 0.002
+    entropy_coef: 0.005
     gamma: 0.99
     lam: 0.95
     max_grad_norm: 1.0

@@ -14,7 +14,7 @@ runner:
   num_steps_per_env: 16
   obs_groups:
     actor: [policy]
-    critic: [critic]
+    critic: [policy]
   verbose: true
   check_for_nan: false
   torch_compile_mode: null

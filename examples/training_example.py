@@ -148,7 +148,8 @@ def make_env(env_cfg: dict, render: bool = False) -> VecEnv:
         )
 
     if framework == "isaaclab":
-        from telekinesis.rlbotics.envs.isaaclab_env import IsaacLabVecEnv
+        from telekinesis.rlbotics.envs.isaaclab_env import IsaacLabVecEnv, launch_simulator
+        launch_simulator(headless=False, enable_camera=render)
 
         return IsaacLabVecEnv(
             task=env_cfg["id"],

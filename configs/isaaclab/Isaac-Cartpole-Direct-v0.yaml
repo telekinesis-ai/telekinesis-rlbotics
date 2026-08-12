@@ -1,16 +1,16 @@
-# Isaac-Reach-Franka-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
+# Isaac-Cartpole-Direct-v0: https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html
 #
 # A starting point for this kind of task, not a measured recipe. Watch Diagnostics/kl.
 
 env:
   framework: isaaclab
-  id: Isaac-Reach-Franka-v0
-  num_envs: 2048
+  id: Isaac-Cartpole-Direct-v0
+  num_envs: 64
   device: auto
   headless: true
 
 runner:
-  num_learning_iterations: 500
+  num_learning_iterations: 150
   num_steps_per_env: 16
   obs_groups:
     actor: [policy]
@@ -46,7 +46,7 @@ runner:
 
   actor:
     class_name: MLPModel
-    hidden_dims: [256, 256, 128]
+    hidden_dims: [64, 64]
     activation: elu
     obs_normalization: true
     distribution_cfg:
@@ -56,6 +56,6 @@ runner:
 
   critic:
     class_name: MLPModel
-    hidden_dims: [256, 256, 128]
+    hidden_dims: [64, 64]
     activation: elu
     obs_normalization: true
