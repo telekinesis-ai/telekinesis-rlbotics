@@ -25,6 +25,12 @@ env:
   # headless: true
 
 runner:
+  # Runner class: "OnPolicyRunner", or a "module:Class" import path.
+  class_name: OnPolicyRunner
+
+  # RNG seed for model init, action sampling and mini-batch order. Null, or integer in [0, 2**32).
+  seed: null
+
   # Iterations to train for. Positive integer.
   num_learning_iterations: 3000
 

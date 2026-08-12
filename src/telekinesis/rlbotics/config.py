@@ -672,6 +672,17 @@ class OnPolicyRunnerConfig(BaseConfig):
     Bundles the observation mapping, rollout settings, and the algorithm, actor, and critic configs.
 
     Attributes:
+        class_name: Runner class to instantiate, as a name or the class itself. Resolved by
+            :func:`~telekinesis.rlbotics.runner.create_runner`, which is what makes a custom runner
+            subclass pluggable the same way a custom algorithm or model is. Unlike those, this is
+            not restricted to a fixed set of names: :data:`~telekinesis.rlbotics.runner.RUNNERS` is
+            meant to grow, so any non-empty string (a registered name or a ``"module:Class"`` import
+            path) or callable is accepted here, and it is ``create_runner`` that reports an unknown
+            one.
+        seed: Seed for Python's, NumPy's and PyTorch's random number generators, applied once when
+            the runner is built. Makes model initialization, action sampling and mini-batch order
+            reproducible across runs. ``None`` leaves the ambient random state alone. Does not seed
+            the environment, which is a separate, adapter-specific concern.
         obs_groups: Mapping from observation set (``"actor"``, ``"critic"``) to the environment
             observation groups it consumes.
         num_learning_iterations: Iterations to train for, which
@@ -693,6 +704,8 @@ class OnPolicyRunnerConfig(BaseConfig):
     """
 
     obs_groups: dict[str, list[str]]
+    class_name: str | Callable = "OnPolicyRunner"
+    seed: int | None = None
     num_learning_iterations: int = 1000
     num_steps_per_env: int = 24
     verbose: bool = True
@@ -712,6 +725,20 @@ class OnPolicyRunnerConfig(BaseConfig):
             ValueError: If any setting is invalid, if ``obs_groups`` is empty or maps a set to an
                 empty list, or if the actor has no ``distribution_cfg``.
         """
+        # Not routed through the shared _check_class_name(): that rejects anything outside a fixed
+        # set of names, which is right for a config with one built-in implementation (PPOConfig,
+        # MLPConfig, ...) but wrong here, where the whole point is that RUNNERS keeps growing.
+        if not callable(self.class_name) and not (isinstance(self.class_name, str) and self.class_name):
+            raise ValueError(
+                f"'class_name' must be a non-empty string or a callable, got {self.class_name!r}."
+            )
+
+        if self.seed is not None and not 0 <= self.seed < 2**32:
+            raise ValueError(
+                f"'seed' must be in [0, 2**32), which is what NumPy's global seed accepts, got "
+                f"{self.seed}."
+            )
+
         _check_positive("num_learning_iterations", self.num_learning_iterations)
         _check_positive("num_steps_per_env", self.num_steps_per_env)
 

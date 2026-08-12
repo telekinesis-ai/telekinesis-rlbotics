@@ -47,7 +47,7 @@ from telekinesis.rlbotics.config import (
     PPOConfig,
 )
 from telekinesis.rlbotics.envs.gym_env import GymnasiumVecEnv
-from telekinesis.rlbotics.runner import OnPolicyRunner
+from telekinesis.rlbotics.runner import create_runner
 
 
 def make_runner_config(
@@ -55,6 +55,7 @@ def make_runner_config(
     log_dir: str,
     num_learning_iterations: int = 20,
     experiment: str = "configuration_example",
+    seed: int | None = None,
 ) -> OnPolicyRunnerConfig:
     """Build a runner configuration field by field.
 
@@ -66,6 +67,7 @@ def make_runner_config(
         num_learning_iterations: Iterations to train for, which :meth:`OnPolicyRunner.learn` reads
             from the config when called with no argument.
         experiment: Experiment name, the directory its runs are grouped under.
+        seed: Seed for model init, action sampling and mini-batch order, or None to leave it random.
 
     Returns:
         The runner configuration.
@@ -132,6 +134,10 @@ def make_runner_config(
     )
 
     return OnPolicyRunnerConfig(
+        # A registered name, or an import path such as "my_pkg.runner:MyRunner" for your own
+        class_name="OnPolicyRunner",
+        # Left None by default: set it for a reproducible run, e.g. when comparing two configs
+        seed=seed,
         # Which observation groups each network reads. The Gymnasium adapter publishes one,
         # "observation"; a simulator with privileged state gives the critic its own group here.
         obs_groups={"actor": ["observation"], "critic": ["observation"]},
@@ -241,6 +247,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for model init, action sampling and mini-batch order (default: unseeded).",
+    )
+
+    parser.add_argument(
         "--write-config",
         metavar="FILE",
         help="Where to write the configuration as YAML (default: beside the run).",
@@ -280,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         obs_dim=env.obs_dim,
         log_dir=log_dir,
         num_learning_iterations=args.num_learning_iterations,
+        seed=args.seed,
     )
 
     logger.info(
@@ -289,8 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         f"steps_per_env={runner_cfg.num_steps_per_env}"
     )
 
-    # 2. Create the runner
-    runner = OnPolicyRunner(
+    # 2. Create the runner the config names
+    runner = create_runner(
         env=env,
         runner_cfg=runner_cfg,
         device=args.device,

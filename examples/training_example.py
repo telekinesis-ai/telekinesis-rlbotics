@@ -100,6 +100,9 @@ def load_config(
     if args.log_dir is not None:
         runner_data.setdefault("logger", {})["log_dir"] = args.log_dir
 
+    if args.seed is not None:
+        runner_data["seed"] = args.seed
+
     if args.resume is not None:
         runner_data.setdefault("logger", {})["resume"] = args.resume
 
@@ -149,12 +152,19 @@ def make_env(env_cfg: dict, render: bool = False) -> VecEnv:
 
     if framework == "isaaclab":
         from telekinesis.rlbotics.envs.isaaclab_env import IsaacLabVecEnv, launch_simulator
-        launch_simulator(headless=False, enable_camera=render)
+
+        # The simulator is a process-wide singleton: whichever call launches it first decides
+        # whether cameras are enabled, so this has to happen before the training env is built if a
+        # later env is ever going to need them too. Kept in sync with the headless/render_mode this
+        # env is about to be built with, since a mismatch here silently wins and the correct values
+        # passed below become a no-op.
+        headless = env_cfg.get("headless", True)
+        launch_simulator(headless=headless, enable_cameras=render)
 
         return IsaacLabVecEnv(
             task=env_cfg["id"],
             clip_actions=env_cfg.get("clip_actions"),
-            headless=env_cfg.get("headless", True),
+            headless=headless,
             **shared,
         )
 
@@ -257,6 +267,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--seed",
+        type=int,
+        help="Seed for model init, action sampling and mini-batch order. Overrides runner.seed.",
+    )
+
+    parser.add_argument(
         "--resume",
         nargs="?",
         const="last",
@@ -308,7 +324,16 @@ def main(argv: list[str] | None = None) -> int:
         f"episode_limit={env.max_episode_length}"
     )
 
-    # 3. Create the runner
+    # 3. Create the runner. Built directly rather than dispatched on runner.class_name, so a config
+    # asking for a different runner is rejected here instead of silently training on this one.
+    if runner_cfg.class_name not in ("OnPolicyRunner", OnPolicyRunner):
+        logger.error(
+            f"This example only builds OnPolicyRunner, got runner.class_name="
+            f"{runner_cfg.class_name!r}. Use telekinesis.rlbotics.runner.create_runner() to build "
+            "whatever class_name names."
+        )
+        return 1
+
     runner = OnPolicyRunner(
         env=env,
         runner_cfg=runner_cfg,

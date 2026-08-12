@@ -1,10 +1,30 @@
 """Shared helpers for resolving callables and devices."""
 
 import importlib
+import random
 from collections.abc import Callable
 
+import numpy as np
 import torch
 from loguru import logger
+
+
+def set_seed(seed: int) -> None:
+    """Seed Python's, NumPy's and PyTorch's random number generators.
+
+    Makes model initialization, action sampling and mini-batch shuffling reproducible from run to
+    run. What this does not cover is the environment: initial states, domain randomization and any
+    other simulator-side randomness are seeded by the adapter, if at all, which is a separate concern
+    from the training algorithm's own randomness.
+
+    Args:
+        seed: Seed applied to every generator.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def resolve_callable(reference: Callable | str) -> Callable:

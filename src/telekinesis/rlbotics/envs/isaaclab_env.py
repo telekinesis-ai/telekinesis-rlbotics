@@ -282,9 +282,43 @@ class IsaacLabVecEnv(VecEnv):
         """Write Isaac Lab's per-environment step counter."""
         self.unwrapped.episode_length_buf = value
 
+    @property
+    def cfg(self):
+        """Return the task's own configuration, read live off the simulation.
+
+        A property rather than a value copied in at construction, so it stays correct even if
+        something else mutates the task's config after this adapter is built.
+        """
+        return self.unwrapped.cfg
+
     def get_observations(self) -> TensorDict:
-        """Return the current observations without stepping."""
-        return self.obs
+        """Return fresh observations without stepping, recomputed rather than replayed.
+
+        Isaac Lab's own wrapper does this too: whatever :meth:`step` or :meth:`reset` last cached
+        only reflects the state at that call, so a caller in between — logging, or an algorithm
+        peeking before it acts — would otherwise see a stale observation if anything else touched
+        the simulation. The two task workflows publish it differently, the same way
+        :meth:`_action_dim` reads two different places for the action count: a manager-based task
+        through its observation manager, a direct task through its own method.
+        """
+        manager = getattr(self.unwrapped, "observation_manager", None)
+        obs = manager.compute() if manager is not None else self.unwrapped._get_observations()
+        return self._observations(obs)
+
+    def seed(self, seed: int = -1) -> int:
+        """Reseed the task's own random number generator.
+
+        This is separate from :func:`~telekinesis.rlbotics.utils.set_seed`, which seeds model
+        init, action sampling and mini-batch order on the training side: the simulation has its
+        own domain randomization and reset noise, which lives here instead.
+
+        Args:
+            seed: Seed to use. Defaults to -1, which asks Isaac Lab to pick one.
+
+        Returns:
+            The seed that was actually used.
+        """
+        return self.unwrapped.seed(seed)
 
     def reset(self) -> TensorDict:
         """Reset all environments."""

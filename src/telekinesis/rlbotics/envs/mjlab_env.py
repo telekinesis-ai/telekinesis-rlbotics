@@ -228,9 +228,39 @@ class MjlabVecEnv(VecEnv):
         """
         return TensorDict(obs, batch_size=(self.num_envs,))
 
+    @property
+    def cfg(self):
+        """Return the task's own configuration, read live off the simulation.
+
+        A property rather than a value copied in at construction, so it stays correct even if
+        something else mutates the task's config after this adapter is built.
+        """
+        return self.venv.cfg
+
     def get_observations(self) -> TensorDict:
-        """Return the current observations without stepping."""
-        return self.obs
+        """Return fresh observations without stepping, recomputed rather than replayed.
+
+        Whatever :meth:`step` or :meth:`reset` last cached only reflects the state at that call, so
+        a caller in between — logging, or an algorithm peeking before it acts — would otherwise see
+        a stale observation if anything else touched the simulation. mjlab's own observation manager
+        is the source of truth, the same one :meth:`step` and :meth:`reset` read from.
+        """
+        return self._observations(self.venv.observation_manager.compute())
+
+    def seed(self, seed: int = -1) -> int:
+        """Reseed the task's own random number generator.
+
+        This is separate from :func:`~telekinesis.rlbotics.utils.set_seed`, which seeds model
+        init, action sampling and mini-batch order on the training side: the simulation has its
+        own domain randomization and reset noise, which lives here instead.
+
+        Args:
+            seed: Seed to use. Defaults to -1, which asks mjlab to pick one.
+
+        Returns:
+            The seed that was actually used.
+        """
+        return self.venv.seed(seed)
 
     def reset(self) -> TensorDict:
         """Reset all environments."""

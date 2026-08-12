@@ -1,10 +1,47 @@
 """Tests for the shared utilities."""
 
+import random
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
-from telekinesis.rlbotics.utils import resolve_device
+from telekinesis.rlbotics.utils import resolve_device, set_seed
+
+
+class TestSetSeed:
+    """Test the RNG-seeding helper that reproducible runs are built on."""
+
+    def test_same_seed_reproduces_torchs_draw(self):
+        """Test that reseeding puts torch's generator back in the same state."""
+        set_seed(7)
+        first = torch.randn(4)
+        set_seed(7)
+        second = torch.randn(4)
+
+        assert torch.equal(first, second)
+
+    def test_different_seeds_diverge(self):
+        """Test that two different seeds are not (for all practical purposes) the same draw."""
+        set_seed(7)
+        first = torch.randn(4)
+        set_seed(8)
+        second = torch.randn(4)
+
+        assert not torch.equal(first, second)
+
+    def test_numpy_and_the_stdlib_generator_are_seeded_too(self):
+        """Test that NumPy and Python's own random module move together with torch's.
+
+        Nothing in this library samples from them directly today, but a user's environment or reward
+        function easily could, and a "seed" that only covered torch would silently miss that.
+        """
+        set_seed(7)
+        first = (random.random(), np.random.rand())
+        set_seed(7)
+        second = (random.random(), np.random.rand())
+
+        assert first == second
 
 
 def with_devices(mps: bool, cuda: bool):

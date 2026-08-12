@@ -156,9 +156,43 @@ class GymnasiumVecEnv(VecEnv):
             {"observation": self.obs}, batch_size=(self.num_envs,), device=self.device
         )
 
+    @property
+    def cfg(self):
+        """Return the task's registration spec, read live off the vector environment.
+
+        Gymnasium has no rich per-task configuration object the way the manager-based simulators
+        do, so this is the closest equivalent for logging and introspection: the id, the entry
+        point and whatever kwargs built it.
+        """
+        return self.venv.spec
+
     def get_observations(self) -> TensorDict:
-        """Return the current observations without stepping."""
+        """Return the current observations without stepping.
+
+        Unlike the manager-based adapters, this is necessarily the last cached observation:
+        Gymnasium has no "compute the current observation" call independent of reset() or step(),
+        so there is nothing fresher to recompute it from.
+        """
         return self._observations()
+
+    def seed(self, seed: int = -1) -> int:
+        """Reseed the task's own random number generator.
+
+        This is separate from :func:`~telekinesis.rlbotics.utils.set_seed`, which seeds model
+        init, action sampling and mini-batch order on the training side: the simulation has its own
+        reset randomness, which lives here instead. Gymnasium folds seeding into reset() itself
+        rather than exposing a bare reseed call, so this necessarily starts a fresh episode too.
+
+        Args:
+            seed: Seed to use. Defaults to -1, which asks NumPy to pick one.
+
+        Returns:
+            The seed that was actually used.
+        """
+        if seed < 0:
+            seed = int(np.random.randint(0, 2**31 - 1))
+        self.obs = self._to_tensor(self.venv.reset(seed=seed)[0])
+        return seed
 
     def reset(self) -> TensorDict:
         """Reset all environments."""

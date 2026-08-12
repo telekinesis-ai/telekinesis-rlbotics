@@ -22,7 +22,7 @@ from telekinesis.rlbotics.envs.base import VecEnv
 from telekinesis.rlbotics.logger import Logger, VideoLogger
 from telekinesis.rlbotics.models import CNNModel, MLPModel
 from telekinesis.rlbotics.rollout import RolloutBuffer
-from telekinesis.rlbotics.utils import resolve_device
+from telekinesis.rlbotics.utils import resolve_callable, resolve_device, set_seed
 
 
 class _ScaledPolicy(torch.nn.Module):
@@ -71,12 +71,20 @@ class OnPolicyRunner:
         the checkpoint config asks to resume, that happens here, so the runner is ready to continue
         training as soon as it is built.
 
+        If ``runner_cfg.seed`` is set, it is applied first, before the actor and critic are built, so
+        model initialization is reproducible too. This constructs the ``OnPolicyRunner`` class
+        directly; to build whichever runner class ``runner_cfg.class_name`` names, use
+        :func:`create_runner`.
+
         Args:
             env: Vectorized environment for parallel experience collection.
             runner_cfg: Runner configuration, including the logger, checkpoint, algorithm, actor and
                 critic configs.
             device: Device for computation ("cpu" or "cuda:0", etc.).
         """
+        if runner_cfg.seed is not None:
+            set_seed(runner_cfg.seed)
+
         self.env = env
         self.runner_cfg = runner_cfg
         self.device = resolve_device(device)
@@ -721,3 +729,46 @@ class OnPolicyRunner:
                 backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size
             )
         torch.cuda.set_device(self.gpu_local_rank)
+
+
+# Runner classes that can be named by a runner config's class_name. A distillation runner, a
+# multi-agent one, or any other OnPolicyRunner-shaped subclass registers here to become nameable
+# the same way "PPO" names an algorithm or "MLPModel" names a model.
+RUNNERS = {
+    "OnPolicyRunner": OnPolicyRunner,
+}
+
+
+def create_runner(
+    env: VecEnv,
+    runner_cfg: OnPolicyRunnerConfig,
+    device: str = "cpu",
+) -> OnPolicyRunner:
+    """Build the runner named by a configuration's ``class_name``.
+
+    Calling ``OnPolicyRunner(...)`` directly always builds that one class; going through this
+    function is what makes ``runner_cfg.class_name`` mean something, the same way an algorithm or a
+    model config's ``class_name`` is resolved rather than read for documentation. A name is tried
+    against :data:`RUNNERS` first and, if not found there, imported as a ``"module:Class"`` path, so
+    a custom runner does not have to be registered to be used, only importable.
+
+    Args:
+        env: Vectorized environment for parallel experience collection.
+        runner_cfg: Runner configuration. Its ``class_name`` selects which runner class to build.
+        device: Device for computation ("cpu" or "cuda:0", etc.).
+
+    Returns:
+        The constructed runner.
+
+    Raises:
+        ImportError: If ``class_name`` is an import path and the module cannot be imported.
+        AttributeError: If ``class_name`` is an import path and the module has no such attribute.
+    """
+    name = runner_cfg.class_name
+    if callable(name):
+        runner_class = name
+    elif name in RUNNERS:
+        runner_class = RUNNERS[name]
+    else:
+        runner_class = resolve_callable(name)
+    return runner_class(env=env, runner_cfg=runner_cfg, device=device)
