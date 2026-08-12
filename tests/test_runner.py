@@ -21,7 +21,7 @@ from telekinesis.rlbotics.config import (
 )
 from telekinesis.rlbotics.envs.base import VecEnv
 from telekinesis.rlbotics.algorithms import PPO
-from telekinesis.rlbotics.runner import OnPolicyRunner
+from telekinesis.rlbotics.runner import RUNNERS, OnPolicyRunner, create_runner
 
 # Check if onnx is available
 HAS_ONNX = importlib.util.find_spec("onnx") is not None
@@ -132,6 +132,147 @@ def make_runner_cfg(
         critic=MLPConfig(hidden_dims=(16, 16)),
         **overrides,
     )
+
+
+class TestClassNameValidation:
+    """Test OnPolicyRunnerConfig.class_name, which is deliberately not restricted to a fixed set.
+
+    Unlike PPOConfig/MLPConfig, where class_name names one of this library's own implementations,
+    RUNNERS is meant to grow, so anything that could plausibly resolve later has to be accepted here
+    and left for create_runner() to actually resolve or reject.
+    """
+
+    def test_the_default_is_accepted(self):
+        """Test that not setting class_name at all still validates."""
+        cfg = make_runner_cfg()
+        assert cfg.class_name == "OnPolicyRunner"
+
+    def test_an_arbitrary_registered_or_importable_name_is_accepted(self):
+        """Test that a name outside any fixed set is not rejected at the config level."""
+        cfg = make_runner_cfg(class_name="my_pkg.runners:MyDistillationRunner")
+        assert cfg.class_name == "my_pkg.runners:MyDistillationRunner"
+
+    def test_a_class_passed_directly_is_accepted(self):
+        """Test that a callable needs no name at all."""
+        cfg = make_runner_cfg(class_name=OnPolicyRunner)
+        assert cfg.class_name is OnPolicyRunner
+
+    @pytest.mark.parametrize("bad", ["", None, 123])
+    def test_neither_a_string_nor_a_callable_is_rejected(self, bad):
+        """Test that only the shape of class_name is checked, not its content."""
+        with pytest.raises(ValueError, match="class_name"):
+            make_runner_cfg(class_name=bad)
+
+
+class TestSeedValidation:
+    """Test OnPolicyRunnerConfig.seed."""
+
+    def test_none_is_the_default(self):
+        """Test that a config built with no seed leaves the ambient random state untouched."""
+        assert make_runner_cfg().seed is None
+
+    def test_a_valid_seed_is_kept(self):
+        """Test that an in-range seed round-trips unchanged."""
+        assert make_runner_cfg(seed=42).seed == 42
+
+    @pytest.mark.parametrize("bad_seed", [-1, 2**32])
+    def test_a_seed_outside_numpys_range_is_rejected(self, bad_seed):
+        """Test that a seed NumPy's own generator could not accept fails at config time, not later."""
+        with pytest.raises(ValueError, match="seed"):
+            make_runner_cfg(seed=bad_seed)
+
+
+class TestSeedReproducibility:
+    """Test that runner_cfg.seed makes model initialization reproducible."""
+
+    def test_seed_is_applied_before_the_models_are_built(self):
+        """Test that a configured seed reaches set_seed, and unset leaves it uncalled."""
+        with patch("telekinesis.rlbotics.runner.set_seed") as mock_seed:
+            OnPolicyRunner(
+                env=MockEnvironment(num_envs=4, obs_dim=8, num_actions=2),
+                runner_cfg=make_runner_cfg(seed=99),
+                device="cpu",
+            )
+        mock_seed.assert_called_once_with(99)
+
+        with patch("telekinesis.rlbotics.runner.set_seed") as mock_seed:
+            OnPolicyRunner(
+                env=MockEnvironment(num_envs=4, obs_dim=8, num_actions=2),
+                runner_cfg=make_runner_cfg(),
+                device="cpu",
+            )
+        mock_seed.assert_not_called()
+
+    def test_same_seed_gives_identical_initial_weights(self):
+        """Test that two runners built with the same seed start from the same actor weights.
+
+        The first parameter in iteration order is the distribution's log_std, which is set from
+        init_std rather than randomly, so it would pass even if seeding did nothing: the comparison
+        has to use an actual weight matrix.
+        """
+
+        def first_layer_weight(seed):
+            env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+            runner = OnPolicyRunner(env=env, runner_cfg=make_runner_cfg(seed=seed), device="cpu")
+            return dict(runner.alg.actor.named_parameters())["mlp.0.weight"].clone()
+
+        assert torch.equal(first_layer_weight(123), first_layer_weight(123))
+        assert not torch.equal(first_layer_weight(123), first_layer_weight(456))
+
+
+class TestCreateRunner:
+    """Test that create_runner() resolves runner_cfg.class_name instead of always building
+    OnPolicyRunner, which is what makes the field mean something."""
+
+    def test_default_class_name_builds_the_base_runner(self):
+        """Test that the shipped default resolves to OnPolicyRunner."""
+        env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+        runner = create_runner(env=env, runner_cfg=make_runner_cfg(), device="cpu")
+        assert type(runner) is OnPolicyRunner
+
+    def test_a_registered_subclass_is_resolved_by_name(self):
+        """Test that naming a class registered in RUNNERS builds that subclass."""
+
+        class StubRunner(OnPolicyRunner):
+            """A subclass standing in for a future runner variant."""
+
+        RUNNERS["StubRunner"] = StubRunner
+        try:
+            env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+            runner = create_runner(
+                env=env, runner_cfg=make_runner_cfg(class_name="StubRunner"), device="cpu"
+            )
+            assert type(runner) is StubRunner
+        finally:
+            del RUNNERS["StubRunner"]
+
+    def test_a_class_passed_directly_skips_the_registry(self):
+        """Test that class_name being callable is used as-is, registered or not."""
+
+        class StubRunner(OnPolicyRunner):
+            """A subclass standing in for a future runner variant."""
+
+        env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+        runner = create_runner(env=env, runner_cfg=make_runner_cfg(class_name=StubRunner), device="cpu")
+        assert type(runner) is StubRunner
+
+    def test_an_import_path_not_in_the_registry_is_imported(self):
+        """Test that a "module:Class" name is resolved even when it names nothing in RUNNERS."""
+        env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+        runner = create_runner(
+            env=env,
+            runner_cfg=make_runner_cfg(class_name="telekinesis.rlbotics.runner:OnPolicyRunner"),
+            device="cpu",
+        )
+        assert type(runner) is OnPolicyRunner
+
+    def test_an_unresolvable_name_fails_clearly(self):
+        """Test that a name that is neither registered nor an import path fails with a clear error."""
+        env = MockEnvironment(num_envs=4, obs_dim=8, num_actions=2)
+        with pytest.raises(ImportError):
+            create_runner(
+                env=env, runner_cfg=make_runner_cfg(class_name="TotallyMadeUp"), device="cpu"
+            )
 
 
 class TestOnPolicyRunnerInitialization:
@@ -298,6 +439,29 @@ class TestOnPolicyRunnerLearn:
             runner.learn(num_learning_iterations=5)
 
             assert runner.current_learning_iteration == 4
+
+    def test_checkpoints_record_the_iteration_they_are_named_for(self):
+        """Test that a checkpoint's contents agree with its file name.
+
+        The iteration counter is what ``--resume`` continues from, so a model_<it>.pt that carried
+        <it - 1> inside would silently replay an iteration on every resume.
+        """
+        with tempfile.TemporaryDirectory() as log_dir:
+            env = MockEnvironment(num_envs=2, obs_dim=8, num_actions=2, device="cpu")
+
+            runner = OnPolicyRunner(
+                env=env,
+                runner_cfg=make_runner_cfg(
+                    num_steps_per_env=1, save_interval=1, log_dir=log_dir
+                ),
+                device="cpu",
+            )
+
+            runner.learn(num_learning_iterations=3)
+
+            for iteration in range(3):
+                path = Path(runner.log_dir) / f"model_{iteration}.pt"
+                assert torch.load(path, weights_only=False)["iteration"] == iteration
 
     def test_learn_records_metrics(self):
         """Test that the rollout is counted and the action std is reported."""

@@ -1,19 +1,9 @@
 """Isaac Lab vector environment wrapper.
 
-Isaac Lab runs Isaac Sim, so it simulates thousands of environments on an NVIDIA GPU with rendering,
-sensors and a large task library. It is an optional dependency::
+Isaac Lab runs Isaac Sim, simulating thousands of environments on an NVIDIA GPU. It needs Python
+3.11, Linux (GLIBC 2.35+) or Windows and a GPU — there is no macOS build. Optional dependency::
 
-    pip install "isaaclab[isaacsim,all]>=2.3" --extra-index-url https://pypi.nvidia.com
-
-That extra index is required, since the Isaac Sim wheels are hosted by NVIDIA rather than PyPI.
-Isaac Lab needs Python 3.11, Linux (GLIBC 2.35+) or Windows, and an NVIDIA GPU. There is no macOS
-build, so unlike the Gymnasium and mjlab adapters this one cannot be run on a laptop at all.
-
-One thing is different here from every other adapter: Isaac Sim has to be running before any task
-module is imported, because those modules import Omniverse extensions that only exist once the app
-is up. So the imports are deferred until :func:`launch_simulator` has run, which
-:class:`IsaacLabVecEnv` does for you. Build the environment before importing anything from
-``isaaclab_tasks`` yourself.
+    pip install "telekinesis-rlbotics[isaaclab]" --extra-index-url https://pypi.nvidia.com
 """
 from __future__ import annotations
 
@@ -31,7 +21,7 @@ from telekinesis.rlbotics.utils import resolve_device
 ISAACLAB_AVAILABLE = importlib.util.find_spec("isaaclab") is not None
 
 INSTALL_HINT = (
-    'Install it with: pip install "isaaclab[isaacsim,all]>=2.3" --extra-index-url '
+    'Install it with: pip install "telekinesis-rlbotics[isaaclab]" --extra-index-url '
     "https://pypi.nvidia.com (needs Python 3.11, Linux or Windows, and an NVIDIA GPU)"
 )
 
@@ -98,7 +88,7 @@ def registered_tasks() -> list[str]:
         ImportError: If Isaac Lab is not installed.
     """
     launch_simulator()
-    gym, _, _ = _load_isaaclab()
+    gym, _ = _load_isaaclab()
     return sorted(task_id for task_id in gym.registry if task_id.startswith("Isaac-"))
 
 
@@ -109,14 +99,13 @@ def _load_isaaclab():
     ``isaaclab_tasks`` is also what registers the tasks.
 
     Returns:
-        Gymnasium, ``parse_env_cfg`` and Isaac Lab's rsl_rl vector environment wrapper.
+        Gymnasium and ``parse_env_cfg``.
     """
     import gymnasium as gym
     import isaaclab_tasks  # noqa: F401
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
-    return gym, parse_env_cfg, RslRlVecEnvWrapper
+    return gym, parse_env_cfg
 
 
 class IsaacLabVecEnv(VecEnv):
@@ -130,7 +119,10 @@ class IsaacLabVecEnv(VecEnv):
     Actions are joint targets rather than a normalized range, so this adapter exposes no action
     bounds: a policy exported with
     :meth:`~telekinesis.rlbotics.runner.OnPolicyRunner.export` carries the observation normalization
-    but no action scaling, and a deployment has to apply the same ``clip_actions``.
+    but no action scaling, and a deployment has to apply the same ``clip_actions``. Clipping happens
+    here, in :meth:`step`, before the actions reach the task. Isaac Lab's own wrapper additionally
+    rewrites the task's ``action_space`` to the clip range; that is skipped, because nothing in this
+    library reads the space — the runner sizes the policy from ``num_actions``.
 
     Example:
         Train a locomotion task with this library's runner::
@@ -172,25 +164,66 @@ class IsaacLabVecEnv(VecEnv):
             ValueError: If the task id is not registered.
         """
         launch_simulator(headless=headless, enable_cameras=render_mode is not None)
-        gym, parse_env_cfg, RslRlVecEnvWrapper = _load_isaaclab()
+        gym, parse_env_cfg = _load_isaaclab()
 
         self.task = task
+        self.clip_actions = clip_actions
         device = self._resolve_device(device)
         # parse_env_cfg applies the overrides to the task's registered config
         env_cfg = parse_env_cfg(task, device=device, num_envs=num_envs)
 
         try:
-            env = gym.make(task, cfg=env_cfg, render_mode=render_mode)
+            self.venv = gym.make(task, cfg=env_cfg, render_mode=render_mode)
         except gym.error.Error as error:
             raise ValueError(self._unknown_task_message(gym, task)) from error
 
-        self.venv = RslRlVecEnvWrapper(env, clip_actions=clip_actions)
-        # The wrapper reads the numbers back off the simulation, so they are what Isaac Lab built
-        self.num_envs = self.venv.num_envs
-        self.num_actions = self.venv.num_actions
-        self.device = torch.device(self.venv.device)
-        self.max_episode_length = int(self.venv.max_episode_length)
-        self.obs = self.venv.get_observations()
+        # Read back off the simulation, so the numbers are what Isaac Lab really built
+        self.num_envs = self.unwrapped.num_envs
+        self.num_actions = self._action_dim(gym)
+        self.device = torch.device(self.unwrapped.device)
+        self.max_episode_length = int(self.unwrapped.max_episode_length)
+        # Isaac Lab does not reset when the task is constructed, and the first rollout step needs an
+        # observation, so this is where the episode starts
+        self.obs = self._observations(self.venv.reset()[0])
+
+    @property
+    def unwrapped(self):
+        """Return the task underneath Gymnasium's wrappers, which is where its attributes live.
+
+        ``gym.make`` hands back a wrapper chain, so the step and reset calls go through
+        :attr:`venv` while everything else — the environment count, the device, the managers — is
+        read from the ``ManagerBasedRLEnv`` or ``DirectRLEnv`` at the bottom of it.
+        """
+        return self.venv.unwrapped
+
+    def _action_dim(self, gym) -> int:
+        """Return the size of the action vector the task expects.
+
+        Isaac Lab has two task workflows and they report this differently: a manager-based task owns
+        an action manager that knows the total dimension, while a direct task only publishes an
+        action space to measure.
+
+        Args:
+            gym: The Gymnasium module.
+
+        Returns:
+            The number of actions per environment.
+        """
+        manager = getattr(self.unwrapped, "action_manager", None)
+        if manager is not None:
+            return int(manager.total_action_dim)
+        return int(gym.spaces.flatdim(self.unwrapped.single_action_space))
+
+    def _observations(self, obs: dict[str, torch.Tensor]) -> TensorDict:
+        """Wrap Isaac Lab's observation groups in a TensorDict.
+
+        Args:
+            obs: Observations, keyed by group name.
+
+        Returns:
+            The observations, batched over environments.
+        """
+        return TensorDict(obs, batch_size=(self.num_envs,))
 
     @staticmethod
     def _unknown_task_message(gym, task: str) -> str:
@@ -242,27 +275,62 @@ class IsaacLabVecEnv(VecEnv):
         It is delegated rather than duplicated so that writing to it, which is how the runner
         staggers episode lengths at the start of training, reaches the simulation.
         """
-        return self.venv.episode_length_buf
+        return self.unwrapped.episode_length_buf
 
     @episode_length_buf.setter
     def episode_length_buf(self, value: torch.Tensor) -> None:
         """Write Isaac Lab's per-environment step counter."""
-        self.venv.episode_length_buf = value
+        self.unwrapped.episode_length_buf = value
+
+    @property
+    def cfg(self):
+        """Return the task's own configuration, read live off the simulation.
+
+        A property rather than a value copied in at construction, so it stays correct even if
+        something else mutates the task's config after this adapter is built.
+        """
+        return self.unwrapped.cfg
 
     def get_observations(self) -> TensorDict:
-        """Return the current observations without stepping."""
-        return self.obs
+        """Return fresh observations without stepping, recomputed rather than replayed.
+
+        Isaac Lab's own wrapper does this too: whatever :meth:`step` or :meth:`reset` last cached
+        only reflects the state at that call, so a caller in between — logging, or an algorithm
+        peeking before it acts — would otherwise see a stale observation if anything else touched
+        the simulation. The two task workflows publish it differently, the same way
+        :meth:`_action_dim` reads two different places for the action count: a manager-based task
+        through its observation manager, a direct task through its own method.
+        """
+        manager = getattr(self.unwrapped, "observation_manager", None)
+        obs = manager.compute() if manager is not None else self.unwrapped._get_observations()
+        return self._observations(obs)
+
+    def seed(self, seed: int = -1) -> int:
+        """Reseed the task's own random number generator.
+
+        This is separate from :func:`~telekinesis.rlbotics.utils.set_seed`, which seeds model
+        init, action sampling and mini-batch order on the training side: the simulation has its
+        own domain randomization and reset noise, which lives here instead.
+
+        Args:
+            seed: Seed to use. Defaults to -1, which asks Isaac Lab to pick one.
+
+        Returns:
+            The seed that was actually used.
+        """
+        return self.unwrapped.seed(seed)
 
     def reset(self) -> TensorDict:
         """Reset all environments."""
-        self.obs, _ = self.venv.reset()
+        self.obs = self._observations(self.venv.reset()[0])
         return self.obs
 
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
         """Execute one step in all environments.
 
         Args:
-            actions: Policy actions, one row per environment.
+            actions: Policy actions, one row per environment, clipped to ``clip_actions`` first when
+                one was given.
 
         Returns:
             Observations, rewards and dones of shape (num_envs,), and Isaac Lab's extras. A task
@@ -270,10 +338,17 @@ class IsaacLabVecEnv(VecEnv):
             algorithm can bootstrap episodes cut off by the time limit; a finite-horizon task does
             not, because there the limit is part of the task.
         """
-        self.obs, rewards, dones, extras = self.venv.step(actions)
-        # Isaac Lab reports dones as integers, while the contract and the rollout buffer want flags
-        # that can be used arithmetically
-        return self.obs, rewards, dones.to(dtype=torch.float32), extras
+        if self.clip_actions is not None:
+            actions = actions.clamp(-self.clip_actions, self.clip_actions)
+
+        obs, rewards, terminated, truncated, extras = self.venv.step(actions)
+        self.obs = self._observations(obs)
+
+        # Isaac Lab keeps termination and truncation apart, while the contract wants one done flag
+        # that can be used arithmetically, plus the truncations for bootstrapping
+        if not self.unwrapped.cfg.is_finite_horizon:
+            extras["time_outs"] = truncated
+        return self.obs, rewards, (terminated | truncated).to(dtype=torch.float32), extras
 
     def close(self) -> None:
         """Close the task. Isaac Sim keeps running, see :func:`shutdown_simulator`."""
@@ -288,9 +363,9 @@ class IsaacLabVecEnv(VecEnv):
         Returns:
             An HxWx3 ``uint8`` array, or None if rendering was not requested.
         """
-        return self.venv.unwrapped.render()
+        return self.unwrapped.render()
 
     @property
     def render_fps(self) -> float:
         """Return the simulation's step rate, for timing a recorded video."""
-        return self.venv.unwrapped.metadata.get("render_fps", 30.0)
+        return self.unwrapped.metadata.get("render_fps", 30.0)

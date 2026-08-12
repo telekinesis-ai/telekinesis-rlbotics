@@ -1,4 +1,4 @@
-"""Vectorized environment interface for reinforcement learning."""
+"""The vectorized environment interface the library trains against."""
 
 from __future__ import annotations
 

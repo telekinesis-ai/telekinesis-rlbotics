@@ -1,4 +1,4 @@
-"""Training logger with TensorBoard and plotting support."""
+"""Training metrics logging to TensorBoard, and video recording."""
 
 from __future__ import annotations
 

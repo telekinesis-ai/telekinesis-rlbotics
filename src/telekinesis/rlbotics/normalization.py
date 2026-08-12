@@ -1,4 +1,4 @@
-"""Normalization modules for observations and rewards."""
+"""Observation and reward normalization."""
 
 from __future__ import annotations
 

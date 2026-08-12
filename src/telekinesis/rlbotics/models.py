@@ -1,4 +1,4 @@
-"""Neural network models for policy and value function approximation."""
+"""MLP and CNN models for actors and critics."""
 
 from __future__ import annotations
 

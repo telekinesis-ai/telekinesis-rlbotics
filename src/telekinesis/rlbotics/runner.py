@@ -22,7 +22,7 @@ from telekinesis.rlbotics.envs.base import VecEnv
 from telekinesis.rlbotics.logger import Logger, VideoLogger
 from telekinesis.rlbotics.models import CNNModel, MLPModel
 from telekinesis.rlbotics.rollout import RolloutBuffer
-from telekinesis.rlbotics.utils import resolve_device
+from telekinesis.rlbotics.utils import resolve_callable, resolve_device, set_seed
 
 
 class _ScaledPolicy(torch.nn.Module):
@@ -71,12 +71,20 @@ class OnPolicyRunner:
         the checkpoint config asks to resume, that happens here, so the runner is ready to continue
         training as soon as it is built.
 
+        If ``runner_cfg.seed`` is set, it is applied first, before the actor and critic are built, so
+        model initialization is reproducible too. This constructs the ``OnPolicyRunner`` class
+        directly; to build whichever runner class ``runner_cfg.class_name`` names, use
+        :func:`create_runner`.
+
         Args:
             env: Vectorized environment for parallel experience collection.
             runner_cfg: Runner configuration, including the logger, checkpoint, algorithm, actor and
                 critic configs.
             device: Device for computation ("cpu" or "cuda:0", etc.).
         """
+        if runner_cfg.seed is not None:
+            set_seed(runner_cfg.seed)
+
         self.env = env
         self.runner_cfg = runner_cfg
         self.device = resolve_device(device)
@@ -258,18 +266,22 @@ class OnPolicyRunner:
         return model.to(self.device)
 
     def learn(
-        self, num_learning_iterations: int, init_at_random_ep_len: bool = False
+        self, num_learning_iterations: int | None = None, init_at_random_ep_len: bool = False
     ) -> None:
-        """Run the learning loop for the specified number of iterations.
+        """Run the learning loop.
 
         With ``logger.log_video`` on, the rollout of every iteration that ends in a checkpoint is
         rendered and written beside it as ``model_<iteration>.mp4``, so there is a clip of what the
         policy was doing at the checkpoint it belongs to.
 
         Args:
-            num_learning_iterations: Number of learning iterations to execute.
+            num_learning_iterations: Number of learning iterations to execute. Defaults to None,
+                which uses the config's ``num_learning_iterations``, so a run configured entirely
+                from a file needs no argument here.
             init_at_random_ep_len: Whether to randomize initial episode lengths for exploration.
         """
+        if num_learning_iterations is None:
+            num_learning_iterations = self.runner_cfg.num_learning_iterations
         # Randomize initial episode lengths (for exploration). The counter is optional on the VecEnv
         # interface, since it belongs to whatever owns the episode, so an environment without one
         # gets told rather than silently starting every episode at zero.
@@ -289,6 +301,13 @@ class OnPolicyRunner:
         # Start learning
         obs = self.env.get_observations().to(self.device)
         self.alg.train_mode()
+
+        # Every rank has to start from the same weights. The gradients are averaged across ranks, so
+        # ranks that began from different random initializations would each be descending on a
+        # different function and the average would mean nothing.
+        if self.is_distributed:
+            logger.info(f"   Synchronizing parameters for rank {self.gpu_global_rank}.")
+            self.alg.broadcast_parameters()
 
         # Initialize the logging writer
         if self.logger.writer is not None:
@@ -314,8 +333,10 @@ class OnPolicyRunner:
                 for _ in range(self.runner_cfg.num_steps_per_env):
                     # Sample actions from policy
                     actions = self.alg.act(obs)
-                    # Step the environment
-                    obs, rewards, dones, extras = self.env.step(actions)
+                    # Step the environment, on whichever device it simulates on. That is usually this
+                    # runner's device, but an environment is free to differ — a GPU policy driving a
+                    # CPU simulator, say — and the move belongs here rather than in every adapter.
+                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     obs = obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
@@ -347,6 +368,11 @@ class OnPolicyRunner:
 
             learn_time = time.time() - start
 
+            # Advanced before anything is written, because _state_dict() records it. A checkpoint
+            # named model_<it>.pt that carried iteration <it - 1> inside would make --resume replay an
+            # iteration, and would misreport which iteration the best policy came from.
+            self.current_learning_iteration = it
+
             # Log information
             self.logger.log(
                 iteration=it,
@@ -374,9 +400,6 @@ class OnPolicyRunner:
             # Save model checkpoint
             if self.checkpoints.should_save(it):
                 self._write_checkpoint(it, frames)
-
-            # Update iteration counter after processing
-            self.current_learning_iteration = it
 
         # Save the final model after training
         if self.checkpoints.enabled:
@@ -643,7 +666,20 @@ class OnPolicyRunner:
         """Configure multi-GPU training.
 
         The distributed settings are derived from the launch environment rather than the config, and are stored in
-        :attr:`multi_gpu_cfg` for the algorithm to consume.
+        :attr:`multi_gpu_cfg` for the algorithm to consume. When the launcher reports more than one process this also
+        brings up the NCCL process group and binds this process to its own GPU. Both are prerequisites, not
+        conveniences: the algorithm's gradient averaging and :meth:`learn`'s parameter broadcast are collective calls
+        that fail on an uninitialized group.
+
+        The device is retargeted rather than rejected. :func:`~telekinesis.rlbotics.utils.resolve_device` maps a bare
+        "cuda" onto "cuda:0", so a launch that hands every process the same device string would otherwise train every
+        rank on GPU 0. Note that this only moves the models and the rollout storage: the environment is built before the
+        runner and stays wherever its caller put it, so a training script under ``torchrun`` should still pass
+        ``cuda:$LOCAL_RANK`` to the environment to keep the simulation off one GPU.
+
+        Raises:
+            ValueError: If the ranks reported by the launcher fall outside the world size, or distributed training was
+                launched on a device NCCL cannot use.
         """
         self.gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
         self.is_distributed = self.gpu_world_size > 1
@@ -657,8 +693,82 @@ class OnPolicyRunner:
         self.gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.gpu_global_rank = int(os.getenv("RANK", "0"))
 
+        if self.gpu_local_rank >= self.gpu_world_size:
+            raise ValueError(
+                f"LOCAL_RANK is {self.gpu_local_rank}, which is not below WORLD_SIZE {self.gpu_world_size}."
+            )
+        if self.gpu_global_rank >= self.gpu_world_size:
+            raise ValueError(
+                f"RANK is {self.gpu_global_rank}, which is not below WORLD_SIZE {self.gpu_world_size}."
+            )
+        if not self.device.startswith("cuda"):
+            raise ValueError(
+                f"WORLD_SIZE is {self.gpu_world_size}, so this is a distributed run, but the device resolved to "
+                f"'{self.device}'. Distributed training goes over NCCL, which needs CUDA. Launch on GPUs, or run a "
+                "single process."
+            )
+
+        expected_device = f"cuda:{self.gpu_local_rank}"
+        if self.device != expected_device:
+            logger.warning(
+                f"   Rank {self.gpu_global_rank} resolved to '{self.device}', but local rank "
+                f"{self.gpu_local_rank} owns '{expected_device}'. Training on '{expected_device}'."
+            )
+            self.device = expected_device
+
         self.multi_gpu_cfg = {
             "global_rank": self.gpu_global_rank,
             "local_rank": self.gpu_local_rank,
             "world_size": self.gpu_world_size,
         }
+
+        # Guarded, because a second runner built in the same process would otherwise re-initialize a
+        # group that is already up, which torch rejects
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(
+                backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size
+            )
+        torch.cuda.set_device(self.gpu_local_rank)
+
+
+# Runner classes that can be named by a runner config's class_name. A distillation runner, a
+# multi-agent one, or any other OnPolicyRunner-shaped subclass registers here to become nameable
+# the same way "PPO" names an algorithm or "MLPModel" names a model.
+RUNNERS = {
+    "OnPolicyRunner": OnPolicyRunner,
+}
+
+
+def create_runner(
+    env: VecEnv,
+    runner_cfg: OnPolicyRunnerConfig,
+    device: str = "cpu",
+) -> OnPolicyRunner:
+    """Build the runner named by a configuration's ``class_name``.
+
+    Calling ``OnPolicyRunner(...)`` directly always builds that one class; going through this
+    function is what makes ``runner_cfg.class_name`` mean something, the same way an algorithm or a
+    model config's ``class_name`` is resolved rather than read for documentation. A name is tried
+    against :data:`RUNNERS` first and, if not found there, imported as a ``"module:Class"`` path, so
+    a custom runner does not have to be registered to be used, only importable.
+
+    Args:
+        env: Vectorized environment for parallel experience collection.
+        runner_cfg: Runner configuration. Its ``class_name`` selects which runner class to build.
+        device: Device for computation ("cpu" or "cuda:0", etc.).
+
+    Returns:
+        The constructed runner.
+
+    Raises:
+        ImportError: If ``class_name`` is an import path and the module cannot be imported.
+        AttributeError: If ``class_name`` is an import path and the module has no such attribute.
+    """
+    name = runner_cfg.class_name
+    if callable(name):
+        runner_class = name
+    elif name in RUNNERS:
+        runner_class = RUNNERS[name]
+    else:
+        runner_class = resolve_callable(name)
+    return runner_class(env=env, runner_cfg=runner_cfg, device=device)

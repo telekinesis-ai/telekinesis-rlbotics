@@ -293,6 +293,34 @@ class TestGymnasiumVecEnv:
             with pytest.raises(ImportError, match=r"telekinesis-rlbotics\[gym\]"):
                 GymnasiumVecEnv("Pendulum-v1", num_envs=2, device="cpu")
 
+    def test_cfg_is_the_tasks_spec(self):
+        """Test that cfg is Gymnasium's own EnvSpec, the closest thing it has to a task config."""
+        env = GymnasiumVecEnv("Pendulum-v1", num_envs=2, device="cpu")
+
+        assert env.cfg is env.venv.spec
+        assert env.cfg.id == "Pendulum-v1"
+        env.close()
+
+    def test_seed_reproduces_the_same_reset(self):
+        """Test that reseeding with the same seed starts the same episode."""
+        env = GymnasiumVecEnv("Pendulum-v1", num_envs=2, device="cpu")
+
+        assert env.seed(123) == 123
+        first = env.get_observations()["observation"].clone()
+
+        assert env.seed(123) == 123
+        second = env.get_observations()["observation"].clone()
+
+        assert torch.equal(first, second)
+        env.close()
+
+    def test_seed_with_no_argument_picks_one(self):
+        """Test that seeding without an argument still reseeds and returns a valid seed."""
+        env = GymnasiumVecEnv("Pendulum-v1", num_envs=2, device="cpu")
+
+        assert env.seed() >= 0
+        env.close()
+
 
 class _FakeEnvCfg:
     """Stand-in for a manager-based env config, which carries num_envs on its scene."""
@@ -312,9 +340,9 @@ class _FakeEnvCfg:
 class _FakeSimEnv:
     """Stand-in for a manager-based env, with the surface both adapters read.
 
-    The mjlab adapter drives this directly, so it mirrors ManagerBasedRlEnv: observations as a plain
-    dict, termination and truncation reported separately, and no reset on construction. The Isaac Lab
-    adapter goes through Isaac Lab's own wrapper, which is stubbed by ``_FakeRslRlWrapper`` below.
+    Both adapters drive this directly, so it mirrors ManagerBasedRlEnv: observations as a plain dict,
+    termination and truncation reported separately, and no reset on construction. ``unwrapped``
+    stands in for the Gymnasium wrapper chain that ``gym.make`` puts around an Isaac Lab task.
     """
 
     def __init__(self, cfg, device, render_mode=None):
@@ -323,19 +351,37 @@ class _FakeSimEnv:
         self.render_mode = render_mode
         self.num_envs = cfg.scene.num_envs
         self.action_manager = SimpleNamespace(total_action_dim=12)
+        self.observation_manager = SimpleNamespace(compute=self._compute_observations)
         self.max_episode_length = 1000
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
         self.metadata = {"render_fps": 50.0}
         self.closed = False
         self.reset_count = 0
         self.stepped_with = None
+        self.last_seed = None
+        self.observation_computes = 0
+        self.direct_observation_calls = 0
+
+    @property
+    def unwrapped(self):
+        return self
 
     def _obs(self) -> dict[str, torch.Tensor]:
         return {
             group: torch.randn(self.num_envs, dim) for group, dim in self.cfg.groups.items()
         }
 
+    def _compute_observations(self) -> dict[str, torch.Tensor]:
+        """Stand in for the observation manager's compute(), counting calls the adapter makes."""
+        self.observation_computes += 1
+        return self._obs()
+
     def get_observations(self) -> dict[str, torch.Tensor]:
+        return self._obs()
+
+    def _get_observations(self) -> dict[str, torch.Tensor]:
+        """Stand in for a direct task's own observation method, used when there is no manager."""
+        self.direct_observation_calls += 1
         return self._obs()
 
     def reset(self, **kwargs) -> tuple[dict[str, torch.Tensor], dict]:
@@ -355,51 +401,9 @@ class _FakeSimEnv:
     def close(self) -> None:
         self.closed = True
 
-
-class _FakeRslRlWrapper:
-    """Stand-in for Isaac Lab's RslRlVecEnvWrapper, which its adapter still goes through.
-
-    The mjlab adapter drives ``_FakeSimEnv`` directly instead, since it wraps mjlab's environment
-    without mjlab's rsl_rl bridge.
-    """
-
-    def __init__(self, env, clip_actions=None):
-        self.env = env
-        self.clip_actions = clip_actions
-        self.num_envs = env.num_envs
-        self.num_actions = 12
-        self.device = torch.device(env.device)
-        self.max_episode_length = 1000.0
-        self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long)
-        self.stepped_with = None
-
-    def _obs(self) -> TensorDict:
-        return TensorDict(
-            {
-                group: torch.randn(self.num_envs, dim)
-                for group, dim in self.env.cfg.groups.items()
-            },
-            batch_size=[self.num_envs],
-        )
-
-    def get_observations(self) -> TensorDict:
-        return self._obs()
-
-    def reset(self) -> tuple[TensorDict, dict]:
-        return self._obs(), {}
-
-    def step(self, actions):
-        self.stepped_with = actions
-        # mjlab reports dones as integers and truncations under "time_outs"
-        return (
-            self._obs(),
-            torch.randn(self.num_envs),
-            torch.zeros(self.num_envs, dtype=torch.long),
-            {"time_outs": torch.zeros(self.num_envs, dtype=torch.bool), "log": {}},
-        )
-
-    def close(self) -> None:
-        self.env.closed = True
+    def seed(self, seed: int = -1) -> int:
+        self.last_seed = seed
+        return 42 if seed == -1 else seed
 
 
 def fake_mjlab(tasks: tuple[str, ...] = ("Mjlab-Velocity-Flat-Unitree-G1",), **cfg_kwargs):
@@ -576,21 +580,54 @@ class TestMjlabVecEnv:
             with pytest.raises(ImportError, match=r"telekinesis-rlbotics\[mjlab\]"):
                 MjlabVecEnv(self.task, device="cpu")
 
+    def test_cfg_is_the_tasks_own_config(self):
+        """Test that cfg is read live off the simulation, not a copy taken at construction."""
+        with fake_mjlab():
+            env = MjlabVecEnv(self.task, num_envs=8, device="cpu")
+
+            assert env.cfg is env.venv.cfg
+
+    def test_get_observations_recomputes_rather_than_replays(self):
+        """Test that get_observations() asks mjlab's observation manager fresh, not self.obs."""
+        with fake_mjlab():
+            env = MjlabVecEnv(self.task, num_envs=8, device="cpu")
+            before = env.venv.observation_computes
+
+            obs = env.get_observations()
+
+            assert env.venv.observation_computes == before + 1
+            assert obs["actor"].shape == (8, 48)
+
+    def test_seed_delegates_to_the_task(self):
+        """Test that seeding reaches mjlab and returns whatever seed it used."""
+        with fake_mjlab():
+            env = MjlabVecEnv(self.task, num_envs=8, device="cpu")
+
+            assert env.seed(7) == 7
+            assert env.venv.last_seed == 7
+
+            assert env.seed() == 42  # mjlab picked one, since none was given
+            assert env.venv.last_seed == -1
+
 
 def fake_isaaclab(
     tasks: tuple[str, ...] = ("Isaac-Velocity-Flat-Anymal-C-v0",),
     groups: dict[str, int] | None = None,
     num_envs: int = 4096,
+    is_finite_horizon: bool = False,
 ):
     """Patch the Isaac Lab pieces the adapter imports with stubs.
 
     Isaac Lab imports its task modules only once Isaac Sim is running, so the adapter defers them to
-    ``_load_isaaclab`` and launches the app first. Both are patched here.
+    ``_load_isaaclab`` and launches the app first. Both are patched here. The adapter drives the task
+    ``gym.make`` returns directly, so the stubbed registry hands back a ``_FakeSimEnv``.
 
     Args:
         tasks: Task ids the stubbed Gymnasium registry knows about.
         groups: Observation groups and their sizes.
         num_envs: Environment count the task config falls back to.
+        is_finite_horizon: Whether the task's horizon is finite, which decides whether the adapter
+            publishes truncations for bootstrapping.
 
     Returns:
         A patch context manager.
@@ -612,14 +649,18 @@ def fake_isaaclab(
     )
 
     def parse_env_cfg(task_name, device="cuda:0", num_envs=None, use_fabric=None):
-        cfg = _FakeEnvCfg(num_envs=num_envs or 4096, groups=groups or {"policy": 48, "critic": 60})
+        cfg = _FakeEnvCfg(
+            num_envs=num_envs or 4096,
+            groups=groups or {"policy": 48, "critic": 60},
+            is_finite_horizon=is_finite_horizon,
+        )
         cfg.device = device
         return cfg
 
     return patch.multiple(
         "telekinesis.rlbotics.envs.isaaclab_env",
         launch_simulator=lambda **kwargs: SimpleNamespace(close=lambda: None),
-        _load_isaaclab=lambda: (gym, parse_env_cfg, _FakeRslRlWrapper),
+        _load_isaaclab=lambda: (gym, parse_env_cfg),
     )
 
 
@@ -657,12 +698,32 @@ class TestIsaacLabVecEnv:
             assert dones.dtype == torch.float32
             assert extras["time_outs"].shape == (8,)
 
-    def test_clip_actions_reaches_isaaclab(self):
-        """Test that action clipping is left to Isaac Lab's own wrapper."""
+    def test_actions_are_clipped_before_the_simulation(self):
+        """Test that clip_actions limits what reaches the task, not just what is recorded."""
         with fake_isaaclab():
-            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu", clip_actions=100.0)
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu", clip_actions=0.5)
+            env.step(torch.full((8, 12), 5.0))
 
-            assert env.venv.clip_actions == 100.0
+            assert env.venv.stepped_with.max() == 0.5
+            assert env.venv.stepped_with.min() == 0.5
+
+    def test_actions_are_passed_through_without_a_clip(self):
+        """Test that no clip means the actions reach the task untouched."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            env.step(torch.full((8, 12), 5.0))
+
+            assert env.venv.stepped_with.max() == 5.0
+
+    def test_a_finite_horizon_task_does_not_bootstrap_time_outs(self):
+        """Test that "time_outs" is only published when the task's horizon is infinite."""
+        with fake_isaaclab(is_finite_horizon=True):
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            _, _, dones, extras = env.step(torch.zeros(8, 12))
+
+            assert "time_outs" not in extras
+            # The truncation still ends the episode, it is just not bootstrapped
+            assert dones[0] == 1.0
 
     def test_episode_length_buf_is_delegated(self):
         """Test that staggering episode lengths reaches the simulation's own counter."""
@@ -694,7 +755,7 @@ class TestIsaacLabVecEnv:
             ):
                 env = IsaacLabVecEnv(self.task, num_envs=4, device="auto")
 
-            assert env.venv.env.device == "cpu"
+            assert env.venv.device == "cpu"
 
     def test_reset_returns_observations_only(self):
         """Test that Isaac Lab's (observations, extras) reset is adapted to the VecEnv contract."""
@@ -711,7 +772,7 @@ class TestIsaacLabVecEnv:
             env = IsaacLabVecEnv(self.task, num_envs=4, device="cpu")
             env.close()
 
-            assert env.venv.env.closed
+            assert env.venv.closed
             assert isaaclab_env._SIMULATION_APP is None
 
     def test_missing_isaaclab_points_at_the_extra(self):
@@ -729,6 +790,46 @@ class TestIsaacLabVecEnv:
 
             assert closed == [True]
             assert isaaclab_env._SIMULATION_APP is None
+
+    def test_cfg_is_the_tasks_own_config(self):
+        """Test that cfg is read live off the simulation, not a copy taken at construction."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+
+            assert env.cfg is env.unwrapped.cfg
+
+    def test_get_observations_recomputes_through_the_manager(self):
+        """Test that a manager-based task's get_observations() asks the manager fresh."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            before = env.unwrapped.observation_computes
+
+            obs = env.get_observations()
+
+            assert env.unwrapped.observation_computes == before + 1
+            assert obs["policy"].shape == (8, 48)
+
+    def test_get_observations_falls_back_for_a_direct_task(self):
+        """Test that a direct task, which has no observation manager, is read through its own method."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+            del env.unwrapped.observation_manager
+
+            obs = env.get_observations()
+
+            assert env.unwrapped.direct_observation_calls == 1
+            assert obs["policy"].shape == (8, 48)
+
+    def test_seed_delegates_to_the_task(self):
+        """Test that seeding reaches Isaac Lab and returns whatever seed it used."""
+        with fake_isaaclab():
+            env = IsaacLabVecEnv(self.task, num_envs=8, device="cpu")
+
+            assert env.seed(7) == 7
+            assert env.unwrapped.last_seed == 7
+
+            assert env.seed() == 42  # Isaac Lab picked one, since none was given
+            assert env.unwrapped.last_seed == -1
 
 
 class TestMjlabContactBuffer:

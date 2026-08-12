@@ -1,21 +1,9 @@
 """mjlab vector environment wrapper.
 
 mjlab pairs Isaac Lab's manager-based API with MuJoCo Warp, so one task runs thousands of
-environments on a GPU. It is an optional dependency, like every other simulator this library
-adapts::
+environments on a GPU. Optional dependency::
 
     pip install "telekinesis-rlbotics[mjlab]"
-
-mjlab chooses its own physics backend through its own extras, so on a training machine install
-``mjlab[cu128]`` and on macOS ``mjlab[cpu]``, which mjlab supports for evaluation only. Training a
-task needs an NVIDIA GPU: MuJoCo Warp has CUDA and CPU backends, and no Metal one.
-
-The adapter wraps mjlab's ``ManagerBasedRlEnv`` directly rather than going through mjlab's own
-``RslRlVecEnvWrapper``. That wrapper subclasses ``rsl_rl.env.VecEnv``, so using it would couple this
-library — which replaces rsl_rl — to rsl_rl's abstract base class and its version drift, to save the
-thirty lines below. What those lines do is exactly what mjlab's wrapper does, and the translation is
-small because the two contracts nearly agree: observations as a :class:`~tensordict.TensorDict` of
-named groups, rewards and dones shaped ``(num_envs,)``, truncations under ``extras["time_outs"]``.
 """
 from __future__ import annotations
 
@@ -240,9 +228,39 @@ class MjlabVecEnv(VecEnv):
         """
         return TensorDict(obs, batch_size=(self.num_envs,))
 
+    @property
+    def cfg(self):
+        """Return the task's own configuration, read live off the simulation.
+
+        A property rather than a value copied in at construction, so it stays correct even if
+        something else mutates the task's config after this adapter is built.
+        """
+        return self.venv.cfg
+
     def get_observations(self) -> TensorDict:
-        """Return the current observations without stepping."""
-        return self.obs
+        """Return fresh observations without stepping, recomputed rather than replayed.
+
+        Whatever :meth:`step` or :meth:`reset` last cached only reflects the state at that call, so
+        a caller in between — logging, or an algorithm peeking before it acts — would otherwise see
+        a stale observation if anything else touched the simulation. mjlab's own observation manager
+        is the source of truth, the same one :meth:`step` and :meth:`reset` read from.
+        """
+        return self._observations(self.venv.observation_manager.compute())
+
+    def seed(self, seed: int = -1) -> int:
+        """Reseed the task's own random number generator.
+
+        This is separate from :func:`~telekinesis.rlbotics.utils.set_seed`, which seeds model
+        init, action sampling and mini-batch order on the training side: the simulation has its
+        own domain randomization and reset noise, which lives here instead.
+
+        Args:
+            seed: Seed to use. Defaults to -1, which asks mjlab to pick one.
+
+        Returns:
+            The seed that was actually used.
+        """
+        return self.venv.seed(seed)
 
     def reset(self) -> TensorDict:
         """Reset all environments."""

@@ -1,4 +1,4 @@
-"""Rollout storage for collecting experience during environment interactions."""
+"""Rollout storage for on-policy experience."""
 
 from __future__ import annotations
 

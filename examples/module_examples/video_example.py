@@ -10,11 +10,8 @@ into a fresh runner, record it. The environment here is a toy that draws its own
 so the example needs no simulator::
 
     python examples/module_examples/video_example.py
-
-Needs imageio to write the file: pip install "telekinesis-rlbotics[examples]"
 """
 
-import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -34,9 +31,6 @@ from telekinesis.rlbotics.config import (
 from telekinesis.rlbotics.envs.base import VecEnv
 from telekinesis.rlbotics.logger import VideoLogger
 from telekinesis.rlbotics.runner import OnPolicyRunner
-
-# Exit code that tells run_all_examples.py this example was skipped, not that it failed
-SKIPPED = 2
 
 FRAME_SIZE = 96
 
@@ -156,14 +150,8 @@ def main() -> int:
     """Train, then load a checkpoint and record it.
 
     Returns:
-        Process exit code: 0 on success, or SKIPPED when imageio is not installed.
+        Process exit code: 0 on success.
     """
-    if importlib.util.find_spec("imageio") is None:
-        logger.warning(
-            'skipping: writing an MP4 needs imageio. pip install "telekinesis-rlbotics[examples]"'
-        )
-        return SKIPPED
-
     with tempfile.TemporaryDirectory() as log_dir:
         # 1. Train briefly, on an environment that renders nothing. This is the normal case: a
         #    training run is headless, and the checkpoints are what it leaves behind

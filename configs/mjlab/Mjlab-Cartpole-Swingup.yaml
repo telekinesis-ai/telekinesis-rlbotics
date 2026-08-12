@@ -1,0 +1,60 @@
+# Mjlab-Cartpole-Swingup: https://github.com/mujocolab/mjlab
+#
+# A starting point for this kind of task, not a measured recipe. Watch Diagnostics/kl.
+
+env:
+  framework: mjlab
+  id: Mjlab-Cartpole-Swingup
+  num_envs: 1024
+  device: auto
+
+runner:
+  num_learning_iterations: 500
+  num_steps_per_env: 16
+  obs_groups:
+    actor: [actor]
+    critic: [critic]
+  verbose: true
+  check_for_nan: false
+  torch_compile_mode: null
+
+  logger:
+    log_dir: logs
+    experiment: mjlab_ppo
+    log_interval: 10
+    save_interval: 100
+    keep_last_n: 5
+    save_best: true
+    log_video: true
+    resume: null
+
+  algorithm:
+    class_name: PPO
+    optimizer: adam
+    learning_rate: 0.001
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    schedule: adaptive
+    desired_kl: 0.01
+    clip_param: 0.2
+    entropy_coef: 0.01
+    gamma: 0.99
+    lam: 0.95
+    max_grad_norm: 1.0
+    value_loss_coef: 1.0
+
+  actor:
+    class_name: MLPModel
+    hidden_dims: [64, 64]
+    activation: elu
+    obs_normalization: true
+    distribution_cfg:
+      class_name: GaussianDistribution
+      init_std: 1.0
+      std_range: [0.2, 2.0]
+
+  critic:
+    class_name: MLPModel
+    hidden_dims: [64, 64]
+    activation: elu
+    obs_normalization: true
