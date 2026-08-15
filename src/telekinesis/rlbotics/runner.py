@@ -197,11 +197,25 @@ class OnPolicyRunner:
             The observation shape, excluding the environment dimension.
 
         Raises:
-            ValueError: If a set combines several groups that are not flat vectors.
+            ValueError: If a group holds separate terms rather than one tensor, or if a set
+                combines several groups that are not flat vectors.
         """
         groups = self.obs_groups[set_name]
         if len(groups) == 1:
-            return tuple(obs[groups[0]].shape[1:])
+            value = obs[groups[0]]
+            # A group whose terms the simulator publishes separately rather than concatenated
+            # arrives nested, and a nested value has only the environment dimension. Caught here
+            # because the shape that survives is (), which reads downstream as a malformed tensor
+            # and draws an error about image observations that has nothing to do with it.
+            if not isinstance(value, torch.Tensor):
+                terms = sorted(str(key) for key in value.keys())
+                raise ValueError(
+                    f"Observation group '{groups[0]}' holds separate terms {terms} rather than one"
+                    f" tensor, so observation set '{set_name}' has no shape to size a model from."
+                    " The task publishes this group unconcatenated; concatenate its terms in the"
+                    " task's observation configuration to train on it."
+                )
+            return tuple(value.shape[1:])
 
         for group in groups:
             if obs[group].dim() != 2:

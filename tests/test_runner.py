@@ -368,6 +368,40 @@ class TestOnPolicyRunnerInitialization:
                 device="cpu",
             )
 
+    def test_a_group_of_separate_terms_is_reported_as_such(self):
+        """Test that a group holding unconcatenated terms says so, rather than blaming images.
+
+        A simulator that publishes a group's terms separately hands over a nested observation,
+        whose only dimension is the environment one. The resulting empty shape used to reach the
+        model builder and produce an error about configuring a CNN, which is unrelated.
+        """
+
+        class NestedObservationEnvironment(MockEnvironment):
+            """An environment whose 'observation' group holds named terms, not one tensor."""
+
+            def _observations(self) -> TensorDict:
+                return TensorDict(
+                    {
+                        "observation": TensorDict(
+                            {
+                                "joint_pos": torch.randn(self.num_envs, 4),
+                                "object_pose": torch.randn(self.num_envs, 7),
+                            },
+                            batch_size=(self.num_envs,),
+                        )
+                    },
+                    batch_size=(self.num_envs,),
+                )
+
+        env = NestedObservationEnvironment(num_envs=4, obs_dim=8, num_actions=2, device="cpu")
+
+        with pytest.raises(ValueError, match="holds separate terms") as failure:
+            OnPolicyRunner(env=env, runner_cfg=make_runner_cfg(), device="cpu")
+
+        message = str(failure.value)
+        assert "joint_pos" in message and "object_pose" in message
+        assert "CNN" not in message
+
 
 class TestInitAtRandomEpisodeLength:
     """Test staggering the initial episode lengths, which needs the environment's own counter."""
