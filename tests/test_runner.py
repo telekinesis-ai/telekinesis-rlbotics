@@ -640,8 +640,27 @@ class TestExport:
             policy = Policy(runner.export(path=temp_dir))
 
             assert policy.get_action(torch.randn(8).numpy()).shape == (2,)
-            assert policy.get_action(torch.randn(1, 8).numpy()).shape == (1, 2)
-            assert policy.get_action(torch.randn(7, 8).numpy()).shape == (7, 2)
+            # More than one, which is the case a specialized batch axis breaks. A vectorized
+            # deployment feeds one observation per environment, so this is the ordinary path.
+            for batch in (1, 2, 64):
+                assert policy.get_action(torch.randn(batch, 8).numpy()).shape == (batch, 2)
+
+    def test_batch_axis_is_symbolic_in_the_graph(self):
+        """Test that the graph itself declares a symbolic batch, not a size it happened to trace.
+
+        Asserted against the graph rather than by running it, because whether a size-one example
+        input specializes the axis depends on the torch version: the same export yields a
+        batch-one-only graph on some and a dynamic one on others, with no error either way.
+        """
+        onnx = pytest.importorskip("onnx")
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph = onnx.load(str(runner.export(path=temp_dir))).graph
+
+            batch_dim = graph.input[0].type.tensor_type.shape.dim[0]
+            assert batch_dim.dim_param, (
+                f"batch axis is the fixed size {batch_dim.dim_value}, not a symbolic dimension"
+            )
 
     def test_action_bounds_are_baked_in(self):
         """Test that an environment with action bounds gets them folded into the graph."""

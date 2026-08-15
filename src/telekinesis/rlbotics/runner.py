@@ -545,18 +545,27 @@ class OnPolicyRunner:
             )
         return policy
 
+    # Two, not one. This tensor is only a tracing example, but a size-one dimension cannot be made
+    # dynamic: torch specializes it to the literal 1 and the ONNX graph then accepts a batch of one
+    # and nothing else, which is exactly what the dynamic batch axis in export_policy_to_onnx is
+    # there to prevent. It fails silently -- no error at export, only an InvalidArgument from
+    # onnxruntime at deployment -- and it is version-dependent, so it does not show up on every
+    # torch the package supports.
+    EXPORT_BATCH = 2
+
     def _export_dummy_input(self, policy: MLPModel | CNNModel) -> torch.Tensor:
-        """Build a single-sample input matching what the policy expects.
+        """Build a dummy input matching what the policy expects.
 
         Args:
             policy: The policy to export.
 
         Returns:
-            A dummy input tensor with a batch dimension of one.
+            A dummy input tensor whose batch dimension is :data:`EXPORT_BATCH`, which is large
+            enough for that dimension to survive as a dynamic one.
         """
         if isinstance(policy, CNNModel):
-            return torch.randn(1, policy.input_channels, *policy.input_dim)
-        return torch.randn(1, policy.input_dim)
+            return torch.randn(self.EXPORT_BATCH, policy.input_channels, *policy.input_dim)
+        return torch.randn(self.EXPORT_BATCH, policy.input_dim)
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
         """Export the policy to TorchScript format.
