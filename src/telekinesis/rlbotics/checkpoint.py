@@ -125,12 +125,27 @@ class CheckpointManager:
             return []
         found = []
         for path in directory.glob(f"{CHECKPOINT_STEM}_*.pt"):
-            try:
-                found.append((int(path.stem.removeprefix(f"{CHECKPOINT_STEM}_")), path))
-            except ValueError:
-                # Not one of ours, leave it alone
-                continue
+            iteration = self._iteration_of(path)
+            # A name with no iteration in it is not one of ours, so leave it alone
+            if iteration is not None:
+                found.append((iteration, path))
         return [path for _, path in sorted(found)]
+
+    @staticmethod
+    def _iteration_of(path: Path) -> int | None:
+        """Return the iteration a checkpoint's name carries, or None if it carries none.
+
+        Args:
+            path: Path to a checkpoint.
+
+        Returns:
+            The iteration, or None for a file that is not a periodic checkpoint of ours, which
+            includes the best checkpoint since its name records no iteration.
+        """
+        try:
+            return int(path.stem.removeprefix(f"{CHECKPOINT_STEM}_"))
+        except ValueError:
+            return None
 
     def latest(self) -> Path | None:
         """Return the checkpoint from the highest iteration, or None if there is none."""
@@ -205,7 +220,16 @@ class CheckpointManager:
                 f"found under '{experiment_dir}'. Train once without resuming to produce one, or "
                 "give a path to a checkpoint file."
             )
-        return max(candidates, key=lambda path: path.stat().st_mtime)
+        # Two checkpoints written in quick succession can share an mtime to the nanosecond, since a
+        # file's timestamp comes from a coarse clock that only advances every few milliseconds. The
+        # iteration in the name breaks that tie, so "last" stays the later checkpoint rather than
+        # whichever one the directory happens to list first. A name carrying no iteration sorts
+        # first, leaving those ties to the order they were found in as before.
+        def recency(path: Path) -> tuple[int, int]:
+            iteration = self._iteration_of(path)
+            return (path.stat().st_mtime_ns, -1 if iteration is None else iteration)
+
+        return max(candidates, key=recency)
 
     @staticmethod
     def _best_of_experiment(experiment_dir: Path) -> Path | None:

@@ -1,5 +1,7 @@
 """Tests for checkpoint writing, rotation and resuming."""
 
+import os
+
 import pytest
 import torch
 
@@ -266,6 +268,24 @@ class TestResumeFrom:
     def test_last_is_the_default(self, tmp_path):
         """Without asking, a resume continues from the most recent checkpoint."""
         self._experiment(tmp_path, first_metric=900.0, second_metric=100.0)
+        cfg = LoggerConfig(log_dir=str(tmp_path), experiment="exp", resume="last")
+
+        resumed = CheckpointManager(cfg).resume_path()
+
+        assert resumed.parent.name == "run_1"
+        assert resumed.name == "model_1.pt"
+
+    def test_last_breaks_an_mtime_tie_on_the_iteration(self, tmp_path):
+        """Checkpoints sharing an mtime still resume from the later iteration.
+
+        A file's timestamp comes from a coarse clock, so two checkpoints written in quick
+        succession can carry the same mtime to the nanosecond. Forced here rather than raced for,
+        since whether it happens at all depends on the filesystem underneath the test.
+        """
+        experiment = self._experiment(tmp_path, first_metric=900.0, second_metric=100.0)
+        stamp = 1_700_000_000_000_000_000
+        for path in experiment.rglob("model_*.pt"):
+            os.utime(path, ns=(stamp, stamp))
         cfg = LoggerConfig(log_dir=str(tmp_path), experiment="exp", resume="last")
 
         resumed = CheckpointManager(cfg).resume_path()
