@@ -197,11 +197,25 @@ class OnPolicyRunner:
             The observation shape, excluding the environment dimension.
 
         Raises:
-            ValueError: If a set combines several groups that are not flat vectors.
+            ValueError: If a group holds separate terms rather than one tensor, or if a set
+                combines several groups that are not flat vectors.
         """
         groups = self.obs_groups[set_name]
         if len(groups) == 1:
-            return tuple(obs[groups[0]].shape[1:])
+            value = obs[groups[0]]
+            # A group whose terms the simulator publishes separately rather than concatenated
+            # arrives nested, and a nested value has only the environment dimension. Caught here
+            # because the shape that survives is (), which reads downstream as a malformed tensor
+            # and draws an error about image observations that has nothing to do with it.
+            if not isinstance(value, torch.Tensor):
+                terms = sorted(str(key) for key in value.keys())
+                raise ValueError(
+                    f"Observation group '{groups[0]}' holds separate terms {terms} rather than one"
+                    f" tensor, so observation set '{set_name}' has no shape to size a model from."
+                    " The task publishes this group unconcatenated; concatenate its terms in the"
+                    " task's observation configuration to train on it."
+                )
+            return tuple(value.shape[1:])
 
         for group in groups:
             if obs[group].dim() != 2:
@@ -545,18 +559,27 @@ class OnPolicyRunner:
             )
         return policy
 
+    # Two, not one. This tensor is only a tracing example, but a size-one dimension cannot be made
+    # dynamic: torch specializes it to the literal 1 and the ONNX graph then accepts a batch of one
+    # and nothing else, which is exactly what the dynamic batch axis in export_policy_to_onnx is
+    # there to prevent. It fails silently -- no error at export, only an InvalidArgument from
+    # onnxruntime at deployment -- and it is version-dependent, so it does not show up on every
+    # torch the package supports.
+    EXPORT_BATCH = 2
+
     def _export_dummy_input(self, policy: MLPModel | CNNModel) -> torch.Tensor:
-        """Build a single-sample input matching what the policy expects.
+        """Build a dummy input matching what the policy expects.
 
         Args:
             policy: The policy to export.
 
         Returns:
-            A dummy input tensor with a batch dimension of one.
+            A dummy input tensor whose batch dimension is :data:`EXPORT_BATCH`, which is large
+            enough for that dimension to survive as a dynamic one.
         """
         if isinstance(policy, CNNModel):
-            return torch.randn(1, policy.input_channels, *policy.input_dim)
-        return torch.randn(1, policy.input_dim)
+            return torch.randn(self.EXPORT_BATCH, policy.input_channels, *policy.input_dim)
+        return torch.randn(self.EXPORT_BATCH, policy.input_dim)
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
         """Export the policy to TorchScript format.
