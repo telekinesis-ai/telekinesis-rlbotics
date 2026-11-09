@@ -15,7 +15,7 @@ import torch.nn as nn
 from loguru import logger
 
 from telekinesis.rlbotics.config import SymmetryConfig
-from telekinesis.rlbotics.models import CNNModel, MLPModel
+from telekinesis.rlbotics.models import Model
 from telekinesis.rlbotics.utils import resolve_callable
 
 
@@ -97,7 +97,7 @@ class Symmetry:
             if tensor is not None:
                 setattr(batch, name, tensor.repeat(num_aug, *([1] * (tensor.dim() - 1))))
 
-    def compute_loss(self, actor: MLPModel | CNNModel, batch, original_batch_size: int) -> torch.Tensor:
+    def compute_loss(self, actor: Model, batch, original_batch_size: int) -> torch.Tensor:
         """Return the mirror loss: how far the policy is from being symmetric on this batch.
 
         The comparison is between the action means the actor predicts on mirrored observations and

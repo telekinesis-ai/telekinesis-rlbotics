@@ -321,6 +321,106 @@ class TestGymnasiumVecEnv:
         assert env.seed() >= 0
         env.close()
 
+    def test_vector_entry_point_is_built_as_one_batch(self):
+        """Test that a natively batched task is built once, not as num_envs copies."""
+        gym.register("TestBatched-v0", vector_entry_point=_BatchedEnv, max_episode_steps=50)
+        env = GymnasiumVecEnv("TestBatched-v0", num_envs=3, device="cpu")
+
+        assert isinstance(env.venv, _BatchedEnv)
+        assert env.venv.num_envs == 3
+        assert env.max_episode_length == 50
+
+        obs, _, _, extras = env.step(torch.zeros(3, 1))
+        assert obs["observation"].shape == (3, 2)
+        assert "episode" not in extras
+        env.close()
+
+    def test_vector_entry_point_must_autoreset_on_the_same_step(self):
+        """Test that a batch-only task with another autoreset mode is rejected, naming the fix."""
+
+        class NextStep(_BatchedEnv):
+            metadata = {"autoreset_mode": gym.vector.AutoresetMode.NEXT_STEP}
+
+        gym.register("TestNextStep-v0", vector_entry_point=NextStep)
+        with pytest.raises(ValueError, match="SAME_STEP"):
+            GymnasiumVecEnv("TestNextStep-v0", num_envs=2, device="cpu")
+
+    def test_next_step_vector_entry_point_falls_back_to_sync(self):
+        """Test that a task with a NEXT_STEP vector env and a single entry point is built synchronously.
+
+        Gymnasium's own CartPole registers such a vector env, so this is the path its tasks take.
+        """
+
+        class NextStep(_BatchedEnv):
+            metadata = {"autoreset_mode": gym.vector.AutoresetMode.NEXT_STEP}
+
+        class Single(gym.Env):
+            observation_space = gym.spaces.Box(-1.0, 1.0, (2,), dtype=np.float32)
+            action_space = gym.spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+
+            def reset(self, *, seed=None, options=None):
+                return np.zeros(2, dtype=np.float32), {}
+
+            def step(self, action):
+                return np.zeros(2, dtype=np.float32), 0.0, False, False, {}
+
+        gym.register(
+            "TestBoth-v0", entry_point=lambda **kwargs: Single(), vector_entry_point=NextStep
+        )
+        env = GymnasiumVecEnv("TestBoth-v0", num_envs=2, device="cpu")
+
+        assert isinstance(env.venv, gym.vector.SyncVectorEnv)
+        env.close()
+
+    def test_episode_metrics_are_forwarded(self):
+        """Test that a task's episode_metrics infos become extras["episode"], masked where unreported."""
+        gym.register("TestMetrics-v0", vector_entry_point=_BatchedEnv)
+        env = GymnasiumVecEnv("TestMetrics-v0", num_envs=3, device="cpu")
+        env.venv.next_infos = {
+            "episode_metrics": {
+                "success": np.array([True, False, True]),
+                "_success": np.array([True, True, False]),
+                "label": np.array(["a", "b", "c"]),       # not numeric
+            },
+            "x_position": np.ones(3),                      # not under episode_metrics
+        }
+
+        _, _, _, extras = env.step(torch.zeros(3, 1))
+
+        assert set(extras["episode"]) == {"success"}
+        success = extras["episode"]["success"]
+        assert success.dtype == torch.float32
+        assert success[:2].tolist() == [1.0, 0.0]
+        assert torch.isnan(success[2])
+        env.close()
+
+
+class _BatchedEnv(gym.vector.VectorEnv if gym is not None else object):
+    """A minimal natively batched task, registered through ``vector_entry_point``."""
+
+    metadata = {"autoreset_mode": gym.vector.AutoresetMode.SAME_STEP} if gym is not None else {}
+
+    def __init__(self, num_envs: int, **kwargs):
+        self.num_envs = num_envs
+        self.single_observation_space = gym.spaces.Box(-1.0, 1.0, (2,), dtype=np.float32)
+        self.single_action_space = gym.spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+        self.observation_space = gym.vector.utils.batch_space(self.single_observation_space, num_envs)
+        self.action_space = gym.vector.utils.batch_space(self.single_action_space, num_envs)
+        self.next_infos: dict = {}
+
+    def reset(self, *, seed=None, options=None):
+        return np.zeros((self.num_envs, 2), dtype=np.float32), {}
+
+    def step(self, actions):
+        zeros = np.zeros(self.num_envs, dtype=bool)
+        return (
+            np.zeros((self.num_envs, 2), dtype=np.float32),
+            np.zeros(self.num_envs, dtype=np.float32),
+            zeros,
+            zeros,
+            self.next_infos,
+        )
+
 
 class _FakeEnvCfg:
     """Stand-in for a manager-based env config, which carries num_envs on its scene."""

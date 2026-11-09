@@ -61,6 +61,11 @@ class Logger:
         self._episode_length_buffer = deque(maxlen=100)
         self.episode_info_buffer = []
 
+        # Per-episode metrics of this iteration (extras["episode"]): a running sum and count per
+        # key, kept on-device so accumulating them never syncs with the host
+        self._episode_metric_sums: dict[str, torch.Tensor] = {}
+        self._episode_metric_counts: dict[str, torch.Tensor] = {}
+
         # Completed-episode rewards/lengths, kept on-device until _flush_pending_episodes()
         # pulls them to the CPU in one batched sync instead of per-step.
         self._pending_rewards: list[torch.Tensor] = []
@@ -141,13 +146,17 @@ class Logger:
         rewards: torch.Tensor,
         dones: torch.Tensor,
         episode_infos: dict | None = None,
+        episode_metrics: dict[str, torch.Tensor] | None = None,
     ) -> None:
         """Process environment step and update metrics.
 
         Args:
             rewards: Reward tensor of shape (num_envs,) or (num_envs, 1).
             dones: Done flags of shape (num_envs,) or (num_envs, 1).
-            episode_infos: Optional dict with episode information to log.
+            episode_infos: Optional dict with episode information to log: the environment's
+                ``extras["log"]``, scalars averaged over the steps that report them.
+            episode_metrics: Optional per-episode metrics: the environment's ``extras["episode"]``,
+                one tensor of shape (num_envs,) per key, averaged over the episodes that ended.
         """
         # Ensure correct shapes
         if rewards.dim() > 1:
@@ -165,6 +174,8 @@ class Logger:
         # Store episode info if provided (always track, regardless of writer)
         if episode_infos is not None:
             self.episode_info_buffer.append(episode_infos)
+        if episode_metrics:
+            self._accumulate_episode_metrics(episode_metrics, dones > 0)
 
         # Check for episode completions. Kept as a GPU tensor op (no .item()/.cpu() here) so this
         # doesn't force a host sync on every rollout step.
@@ -179,6 +190,66 @@ class Logger:
             # Reset completed episodes
             self.cur_reward_sum[done_indices] = 0
             self.cur_episode_length[done_indices] = 0
+
+    def _mean_episode_infos(self) -> dict[str, float]:
+        """Average each scalar key of the buffered episode infos over the entries that carry it."""
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for info in self.episode_info_buffer:
+            for key, value in info.items():
+                if isinstance(value, torch.Tensor):
+                    if value.numel() != 1:
+                        continue
+                    value = value.item()
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                sums[key] = sums.get(key, 0.0) + float(value)
+                counts[key] = counts.get(key, 0) + 1
+        return {key: sums[key] / counts[key] for key in sums}
+
+    def _accumulate_episode_metrics(
+        self, metrics: dict[str, torch.Tensor], done: torch.Tensor
+    ) -> None:
+        """Add the metrics of the episodes that ended on this step to the iteration's totals.
+
+        Args:
+            metrics: One tensor of shape (num_envs,) per key.
+            done: Boolean mask of the environments whose episode ended on this step. Of those, an
+                environment holding NaN for a key did not report it and is left out of its count.
+
+        Raises:
+            ValueError: If a metric does not hold one value per environment.
+        """
+        for key, values in metrics.items():
+            values = torch.as_tensor(values, device=done.device, dtype=torch.float32).reshape(-1)
+            if values.numel() != done.numel():
+                raise ValueError(
+                    f"Episode metric '{key}' has {values.numel()} values, expected one per "
+                    f"environment ({done.numel()})."
+                )
+            counted = done & torch.isfinite(values)
+            total = torch.where(counted, values, 0.0).sum()
+            count = counted.sum()
+            if key in self._episode_metric_sums:
+                self._episode_metric_sums[key] += total
+                self._episode_metric_counts[key] += count
+            else:
+                self._episode_metric_sums[key] = total
+                self._episode_metric_counts[key] = count
+
+    def _mean_episode_metrics(self) -> dict[str, float]:
+        """Return each per-episode metric's mean over this iteration's episodes, and clear them.
+
+        A key no episode reported this iteration is left out rather than logged as zero.
+        """
+        means = {}
+        for key, total in self._episode_metric_sums.items():
+            count = int(self._episode_metric_counts[key])
+            if count > 0:
+                means[key] = float(total) / count
+        self._episode_metric_sums.clear()
+        self._episode_metric_counts.clear()
+        return means
 
     def _flush_pending_episodes(self) -> None:
         """Move any pending completed-episode stats from GPU to the CPU-side buffers."""
@@ -228,6 +299,14 @@ class Logger:
         iteration_time = collect_time + learn_time
         self.total_time += iteration_time
 
+        # The environments' per-step "log" extras of this iteration become custom metrics, averaged
+        # over the steps that reported each key. Cleared every iteration so the buffer stays bounded.
+        if custom_metrics is None and self.episode_info_buffer:
+            custom_metrics = self._mean_episode_infos()
+        self.episode_info_buffer.clear()
+        # Read and cleared every iteration too, so each logged value covers one iteration only
+        episode_metrics = self._mean_episode_metrics()
+
         if not self.cfg.enabled:
             return
         if print_interval is None:
@@ -247,6 +326,7 @@ class Logger:
                     action_std,
                     custom_metrics,
                     diagnostics,
+                    episode_metrics=episode_metrics,
                 )
             return
 
@@ -264,6 +344,8 @@ class Logger:
             mean_length = statistics.mean(self.episode_length_buffer)
             self.writer.add_scalar("Episodes/mean_reward", mean_reward, iteration)
             self.writer.add_scalar("Episodes/mean_length", mean_length, iteration)
+        for key, value in episode_metrics.items():
+            self.writer.add_scalar(f"Episodes/{key}", value, iteration)
 
         # Loss metrics
         if losses is not None:
@@ -311,6 +393,7 @@ class Logger:
                 action_std,
                 custom_metrics,
                 diagnostics,
+                episode_metrics=episode_metrics,
             )
 
     def _print_log(
@@ -325,6 +408,7 @@ class Logger:
         action_std: torch.Tensor | None,
         custom_metrics: dict | None,
         diagnostics: dict | None = None,
+        episode_metrics: dict | None = None,
     ) -> None:
         """Print log to console."""
         width = 80
@@ -350,6 +434,8 @@ class Logger:
             mean_length = statistics.mean(self.episode_length_buffer)
             log_string += f"{'Mean reward:':>{pad}} {mean_reward:.4f}\n"
             log_string += f"{'Mean episode length:':>{pad}} {mean_length:.1f}\n"
+        for key, value in (episode_metrics or {}).items():
+            log_string += f"{f'Episode {key}:':>{pad}} {value:.4f}\n"
 
         # Loss metrics
         if losses is not None:

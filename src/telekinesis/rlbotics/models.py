@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from functools import reduce
 
-from telekinesis.rlbotics.config import CNNConfig, CNNEncoderConfig, GaussianDistributionConfig, MLPConfig
+from telekinesis.rlbotics.config import CNNConfig, CNNEncoderConfig, GaussianDistributionConfig, MLPConfig, SimBaConfig
 from telekinesis.rlbotics.distributions import Distribution, GaussianDistribution, SquashedGaussianDistribution
 from telekinesis.rlbotics.normalization import EmpiricalNormalization
 
@@ -376,6 +376,46 @@ class MLPModel(nn.Module):
     - Export to JIT and ONNX
     """
 
+    @classmethod
+    def from_obs(
+        cls, cfg: MLPConfig, obs_shape: tuple[int, ...], obs_groups: list[str], output_dim: int
+    ) -> MLPModel:
+        """Build the model for the observation set it will consume.
+
+        Every model class in :data:`MODELS` has this constructor, so the runner builds any of them,
+        a subclass such as :class:`SimBaModel` included, without knowing which one it is.
+
+        Args:
+            cfg: Model configuration.
+            obs_shape: Per-environment shape of the observation set.
+            obs_groups: Observation groups the set is made of.
+            output_dim: Output dimension, e.g. the number of actions for an actor or 1 for a critic.
+
+        Returns:
+            The model.
+
+        Raises:
+            ValueError: If the observation set is not a flat vector.
+        """
+        if len(obs_shape) != 1:
+            raise ValueError(
+                f"{cls.__name__} requires a flat observation vector, got groups {obs_groups} with"
+                f" shape {obs_shape}. Configure a CNNModel for image observations."
+            )
+        return cls(cfg=cfg, input_dim=obs_shape[0], output_dim=output_dim)
+
+    def example_input(self) -> torch.Tensor:
+        """Return a random single-sample input of the shape the model consumes, for export tracing."""
+        return torch.randn(1, self.input_dim)
+
+    def share_encoder_with(self, other: Model) -> None:
+        """Give ``other`` this model's encoder. An MLP has none, so this always fails.
+
+        Raises:
+            ValueError: Always.
+        """
+        raise ValueError("'share_cnn_encoders' requires both the actor and the critic to be CNN models.")
+
     def __init__(
         self,
         cfg: MLPConfig,
@@ -402,28 +442,45 @@ class MLPModel(nn.Module):
             build_distribution(cfg.distribution_cfg, output_dim) if cfg.distribution_cfg is not None else None
         )
 
-        # Observation normalization
-        if cfg.obs_normalization:
-            self.obs_normalizer = EmpiricalNormalization(input_dim)
-        else:
-            self.obs_normalizer = nn.Identity()
+        self.obs_normalizer = self._build_obs_normalizer(cfg, input_dim)
 
-        # Determine MLP output dimension
-        mlp_output_dim = (
-            self.distribution.input_dim if self.distribution else output_dim
-        )
-
-        # Create MLP
-        self.mlp = MLP(
-            input_dim=input_dim,
-            output_dim=mlp_output_dim,
-            hidden_dims=cfg.hidden_dims,
-            activation=cfg.activation,
-        )
+        # The network outputs the distribution's parameters, or the output itself if deterministic
+        net_output_dim = self.distribution.input_dim if self.distribution else output_dim
+        self.mlp = self._build_network(cfg, input_dim, net_output_dim)
 
         # Initialize distribution weights if provided
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.mlp)
+
+    def _build_obs_normalizer(self, cfg: MLPConfig, input_dim: int) -> nn.Module:
+        """Build the observation normalizer. A subclass overrides this to normalize differently.
+
+        Args:
+            cfg: Model configuration.
+            input_dim: Input dimension.
+
+        Returns:
+            Running-statistics normalization if ``cfg.obs_normalization`` is set, else identity.
+        """
+        return EmpiricalNormalization(input_dim) if cfg.obs_normalization else nn.Identity()
+
+    def _build_network(self, cfg: MLPConfig, input_dim: int, output_dim: int) -> nn.Module:
+        """Build the network, stored as ``self.mlp``. A subclass overrides this to use another one.
+
+        Args:
+            cfg: Model configuration.
+            input_dim: Input dimension.
+            output_dim: Network output dimension: the distribution's parameters, or the output.
+
+        Returns:
+            The network.
+        """
+        return MLP(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_dims=cfg.hidden_dims,
+            activation=cfg.activation,
+        )
 
     def forward(
         self, x: torch.Tensor, stochastic: bool = True
@@ -511,11 +568,160 @@ class MLPModel(nn.Module):
         return _OnnxMLPModel(self)
 
 
+class _TailNormalization(nn.Module):
+    """Running normalization of the inputs from ``start`` on, passing the leading ones through."""
+
+    def __init__(self, input_dim: int, start: int) -> None:
+        super().__init__()
+        self.start = start
+        self.norm = EmpiricalNormalization(input_dim - start)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([x[..., : self.start], self.norm(x[..., self.start :])], dim=-1)
+
+    @torch.jit.unused
+    def update(self, x: torch.Tensor) -> None:
+        self.norm.update(x[..., self.start :])
+
+
+class _ResidualBlock(nn.Module):
+    """SimBa block: ``x + W2 SiLU(W1 LN(x))``."""
+
+    def __init__(self, dim: int, expansion: int) -> None:
+        super().__init__()
+        self.ln = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, expansion)
+        self.fc2 = nn.Linear(expansion, dim)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.fc2(self.act(self.fc1(self.ln(x))))
+
+
+class _SimBaNetwork(nn.Module):
+    """Point encoder plus SimBa residual trunk, on one flat ``[points | proprio]`` input."""
+
+    def __init__(self, cfg: SimBaConfig, input_dim: int, output_dim: int) -> None:
+        super().__init__()
+        self.point_dim = cfg.point_dim
+        enc: list[nn.Module] = []
+        prev = cfg.point_dim
+        for dim in cfg.encoder_dims:
+            enc += [nn.Linear(prev, dim), nn.ELU()]
+            prev = dim
+        self.encoder = nn.Sequential(*enc)
+        self.inp = nn.Linear(prev + input_dim - cfg.point_dim, cfg.hidden_dim)
+        self.blocks = nn.Sequential(*[_ResidualBlock(cfg.hidden_dim, cfg.expansion) for _ in range(cfg.num_blocks)])
+        self.ln = nn.LayerNorm(cfg.hidden_dim)
+        self.head = nn.Linear(cfg.hidden_dim, output_dim)
+        nn.init.orthogonal_(self.head.weight, cfg.head_gain)
+        nn.init.zeros_(self.head.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = torch.cat([self.encoder(x[..., : self.point_dim]), x[..., self.point_dim :]], dim=-1)
+        return self.head(self.ln(self.blocks(self.inp(z))))
+
+
+class SimBaModel(MLPModel):
+    """Point-cloud SimBa model for policy or value functions (the AlphaNIST network).
+
+    A drop-in for :class:`MLPModel`: it consumes the same flat observation vector, exposes the same
+    distribution interface, and exports the same way, because it keeps the ``obs_normalizer``,
+    ``mlp`` and ``distribution`` attributes the export wrappers read. Only the network and the
+    normalization differ, so those are the two builders it overrides. See
+    :class:`~rlbotics.config.SimBaConfig` for the layout.
+    """
+
+    def __init__(self, cfg: SimBaConfig, input_dim: int, output_dim: int) -> None:
+        """Initialize the model from its config.
+
+        Args:
+            cfg: Model configuration.
+            input_dim: Input dimension: ``cfg.point_dim`` point coordinates followed by proprioception.
+            output_dim: Output dimension, e.g. the number of actions for an actor or 1 for a critic.
+
+        Raises:
+            ValueError: If the input has no room for proprioception after the points.
+        """
+        if input_dim <= cfg.point_dim:
+            raise ValueError(
+                f"SimBaModel expects {cfg.point_dim} point inputs followed by proprioception, got an input of"
+                f" {input_dim}. Check 'point_dim' and that the point group comes first in obs_groups."
+            )
+        super().__init__(cfg, input_dim, output_dim)
+
+    def _build_obs_normalizer(self, cfg: SimBaConfig, input_dim: int) -> nn.Module:
+        """Normalize only the proprioception: the points are already in metric units."""
+        return _TailNormalization(input_dim, cfg.point_dim) if cfg.obs_normalization else nn.Identity()
+
+    def _build_network(self, cfg: SimBaConfig, input_dim: int, output_dim: int) -> nn.Module:
+        """Build the point encoder and residual blocks in place of the MLP."""
+        return _SimBaNetwork(cfg, input_dim, output_dim)
+
+    def update_normalization(self, x: torch.Tensor) -> None:
+        """Update the proprioception normalization statistics.
+
+        Args:
+            x: Batch of observations.
+        """
+        if isinstance(self.obs_normalizer, _TailNormalization):
+            self.obs_normalizer.update(x)
+
+
 class CNNModel(nn.Module):
     """CNN-based model for vision-based policies or value functions.
 
     Combines CNN feature extraction with MLP output head and optional distribution.
     """
+
+    @classmethod
+    def from_obs(
+        cls, cfg: CNNConfig, obs_shape: tuple[int, ...], obs_groups: list[str], output_dim: int
+    ) -> CNNModel:
+        """Build the model for the observation set it will consume, as :meth:`MLPModel.from_obs`.
+
+        Args:
+            cfg: Model configuration.
+            obs_shape: Per-environment shape of the observation set.
+            obs_groups: Observation groups the set is made of. The one group selects the encoder
+                when ``cfg.cnn_cfg`` configures one per group.
+            output_dim: Output dimension, e.g. the number of actions for an actor or 1 for a critic.
+
+        Returns:
+            The model.
+
+        Raises:
+            ValueError: If the observation set is not a single group of images.
+        """
+        if len(obs_groups) != 1 or len(obs_shape) != 3:
+            raise ValueError(
+                f"{cls.__name__} requires exactly one observation group of images with shape"
+                f" (channels, height, width), got groups {obs_groups} with shape {obs_shape}."
+            )
+        return cls(
+            cfg=cfg,
+            input_dim=(obs_shape[1], obs_shape[2]),
+            input_channels=obs_shape[0],
+            output_dim=output_dim,
+            obs_group=obs_groups[0],
+        )
+
+    def example_input(self) -> torch.Tensor:
+        """Return a random single-sample image of the shape the model consumes, for export tracing."""
+        return torch.randn(1, self.input_channels, *self.input_dim)
+
+    def share_encoder_with(self, other: Model) -> None:
+        """Make ``other`` use this model's CNN encoder, so both train the same weights.
+
+        Args:
+            other: The model to share with, typically the critic.
+
+        Raises:
+            ValueError: If ``other`` is not a CNN model, so it has no encoder to replace.
+        """
+        if not isinstance(other, CNNModel):
+            raise ValueError("'share_cnn_encoders' requires both the actor and the critic to be CNN models.")
+        other.cnn = self.cnn
 
     def __init__(
         self,
@@ -679,6 +885,19 @@ class CNNModel(nn.Module):
     def as_onnx(self) -> nn.Module:
         """Export model for ONNX."""
         return _OnnxCNNModel(self)
+
+
+Model = MLPModel | SimBaModel | CNNModel
+"""Any model the runner builds, one per config in :data:`~telekinesis.rlbotics.config.ModelConfig`."""
+
+# Model classes a model config's class_name can name. Each is built the same way, through its
+# from_obs() constructor, and each config class declares in expected_class_names which of these it
+# configures, so config parsing and model building agree on one list of names.
+MODELS: dict[str, type[Model]] = {
+    "MLPModel": MLPModel,
+    "SimBaModel": SimBaModel,
+    "CNNModel": CNNModel,
+}
 
 
 class _TorchMLPModel(nn.Module):

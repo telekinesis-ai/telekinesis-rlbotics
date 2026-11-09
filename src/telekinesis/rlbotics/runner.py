@@ -13,14 +13,13 @@ from tensordict import TensorDict
 from telekinesis.rlbotics.algorithms import ALGORITHMS, check_nan
 from telekinesis.rlbotics.checkpoint import CheckpointManager
 from telekinesis.rlbotics.config import (
-    CNNConfig,
-    MLPConfig,
+    ModelConfig,
     OnPolicyRunnerConfig,
     PPOConfig,
 )
 from telekinesis.rlbotics.envs.base import VecEnv
 from telekinesis.rlbotics.logger import Logger, VideoLogger
-from telekinesis.rlbotics.models import CNNModel, MLPModel
+from telekinesis.rlbotics.models import MODELS, Model
 from telekinesis.rlbotics.rollout import RolloutBuffer
 from telekinesis.rlbotics.utils import resolve_callable, resolve_device, set_seed
 
@@ -109,9 +108,7 @@ class OnPolicyRunner:
 
         # Share CNN encoders between actor and critic if requested
         if runner_cfg.algorithm.share_cnn_encoders:
-            if not (isinstance(actor, CNNModel) and isinstance(critic, CNNModel)):
-                raise ValueError("'share_cnn_encoders' requires both the actor and the critic to be CNN models.")
-            critic.cnn = actor.cnn
+            actor.share_encoder_with(critic)
 
         # Create the rollout storage, giving the critic its own buffer when it observes a different set
         storage = RolloutBuffer(
@@ -214,11 +211,11 @@ class OnPolicyRunner:
 
     def _build_model(
         self,
-        cfg: MLPConfig | CNNConfig,
+        cfg: ModelConfig,
         obs: TensorDict,
         set_name: str,
         output_dim: int,
-    ) -> MLPModel | CNNModel:
+    ) -> Model:
         """Build the actor or the critic from its config.
 
         The model is sized from the observation groups assigned to ``set_name``, so it always matches the observations
@@ -234,34 +231,19 @@ class OnPolicyRunner:
             The model, moved to the runner's device.
 
         Raises:
-            ValueError: If the config type is unsupported, or a CNN model is configured for an observation set that is
-                not a single group of images.
+            ValueError: If the model cannot consume the observation set, e.g. an MLP given images or a CNN given more
+                than one group.
         """
         obs_shape = self._obs_set_shape(obs, set_name)
 
-        if isinstance(cfg, CNNConfig):
-            groups = self.obs_groups[set_name]
-            if len(groups) != 1 or len(obs_shape) != 3:
-                raise ValueError(
-                    f"A CNN model requires observation set '{set_name}' to name exactly one group of images with"
-                    f" shape (channels, height, width), got groups {groups} with shape {obs_shape}."
-                )
-            model = CNNModel(
-                cfg=cfg,
-                input_dim=(obs_shape[1], obs_shape[2]),
-                input_channels=obs_shape[0],
-                output_dim=output_dim,
-                obs_group=groups[0],
-            )
-        elif isinstance(cfg, MLPConfig):
-            if len(obs_shape) != 1:
-                raise ValueError(
-                    f"An MLP model requires observation set '{set_name}' to be a flat vector, got shape {obs_shape}."
-                    f" Configure a CNN model for image observations."
-                )
-            model = MLPModel(cfg=cfg, input_dim=obs_shape[0], output_dim=output_dim)
-        else:
-            raise ValueError(f"Unsupported model config type for the {set_name}: {type(cfg).__name__}.")
+        # A class passed directly is used as-is, a registered name is looked up, and anything else
+        # is an import path to a custom class with the same from_obs() constructor
+        name = cfg.class_name
+        model_class = name if callable(name) else MODELS.get(name) or resolve_callable(name)
+        try:
+            model = model_class.from_obs(cfg, obs_shape, self.obs_groups[set_name], output_dim)
+        except ValueError as error:
+            raise ValueError(f"Cannot build the {set_name}: {error}") from error
 
         return model.to(self.device)
 
@@ -349,10 +331,9 @@ class OnPolicyRunner:
                     self.alg.process_env_step(obs, rewards, dones, extras)
 
                     # Log episode information
-                    if "log" in extras:
-                        self.logger.process_env_step(rewards, dones, extras.get("log"))
-                    else:
-                        self.logger.process_env_step(rewards, dones)
+                    self.logger.process_env_step(
+                        rewards, dones, extras.get("log"), extras.get("episode")
+                    )
 
                     if capture:
                         frames.append(self.video.frame())
@@ -468,7 +449,7 @@ class OnPolicyRunner:
         if loaded_dict.get("best_metric") is not None:
             self.checkpoints.best_metric = loaded_dict["best_metric"]
 
-    def get_inference_policy(self, device: str | None = None) -> MLPModel:
+    def get_inference_policy(self, device: str | None = None) -> Model:
         """Return the policy for inference.
 
         Args:
@@ -485,7 +466,7 @@ class OnPolicyRunner:
         policy = self.alg.get_policy()
         return policy.to(device)
 
-    def get_policy_snapshot(self, device: str | None = None) -> MLPModel | CNNModel:
+    def get_policy_snapshot(self, device: str | None = None) -> Model:
         """Return an independent copy of the current policy, safe to use during training.
 
         :meth:`get_inference_policy` hands back the actual actor being trained: switching it to
@@ -513,7 +494,7 @@ class OnPolicyRunner:
         snapshot.eval()
         return snapshot
 
-    def _policy_for_export(self, from_best: bool) -> MLPModel | CNNModel:
+    def _policy_for_export(self, from_best: bool) -> Model:
         """Return the policy to export, preferring the run's best checkpoint.
 
         The weights are loaded into a copy rather than into the actor being trained, so exporting
@@ -545,7 +526,7 @@ class OnPolicyRunner:
             )
         return policy
 
-    def _export_dummy_input(self, policy: MLPModel | CNNModel) -> torch.Tensor:
+    def _export_dummy_input(self, policy: Model) -> torch.Tensor:
         """Build a single-sample input matching what the policy expects.
 
         Args:
@@ -554,9 +535,7 @@ class OnPolicyRunner:
         Returns:
             A dummy input tensor with a batch dimension of one.
         """
-        if isinstance(policy, CNNModel):
-            return torch.randn(1, policy.input_channels, *policy.input_dim)
-        return torch.randn(1, policy.input_dim)
+        return policy.example_input()
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
         """Export the policy to TorchScript format.

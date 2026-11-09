@@ -21,7 +21,7 @@ Attributes:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, ClassVar
@@ -125,21 +125,82 @@ def _check_unit_interval(name: str, value: float) -> None:
         raise ValueError(f"'{name}' must be in [0, 1], got {value}.")
 
 
-def _model_config_from_dict(cfg: dict[str, Any]) -> MLPConfig | CNNConfig:
-    """Build the model config matching the ``class_name`` in the given dictionary.
+def _subclasses_one_of(cls: Any, names: Iterable[str]) -> str | None:
+    """Return the first of ``names`` that ``cls`` is, or derives from, or None if none is.
+
+    Matched by class name rather than by identity, so this module need not import the classes
+    (models and algorithms pull in torch, which importing a config should not).
+    """
+    names = set(names)
+    for base in getattr(cls, "__mro__", ()):
+        if base.__name__ in names:
+            return base.__name__
+    return None
+
+
+def _model_config_class(class_name: str | Callable) -> type[ModelConfig]:
+    """Return the config class for the model ``class_name`` names. There is no fallback.
+
+    A registered name (``"SimBaModel"``) selects its config directly. A class, or an import path to
+    one (``"my_pkg.models:MyModel"``), selects the config of the registered model it derives from,
+    so a custom :class:`~telekinesis.rlbotics.models.SimBaModel` subclass is configured as SimBa.
+    Anything else is an error rather than a guess: a model read into the wrong config loses its
+    settings without saying so, and the run trains something other than what was written.
 
     Args:
-        cfg: Model configuration dictionary.
+        class_name: The model config's ``class_name``.
 
     Returns:
-        A :class:`CNNConfig` if ``class_name`` resolves to ``CNNModel``, otherwise an
-        :class:`MLPConfig`.
+        The config class.
+
+    Raises:
+        ValueError: If ``class_name`` cannot be resolved to a class, or the class derives from none
+            of the registered models.
+    """
+    by_model = {name: cls for cls in MODEL_CONFIGS for name in cls.expected_class_names}
+    if isinstance(class_name, str) and class_name in by_model:
+        return by_model[class_name]
+
+    # Imported here, not at the top: utils pulls in torch, and only a custom model needs it
+    from telekinesis.rlbotics.utils import resolve_callable
+
+    try:
+        model_class = resolve_callable(class_name)
+    except (ImportError, AttributeError, TypeError) as error:
+        raise ValueError(
+            f"Model class_name {class_name!r} is not one of {list(by_model)}, and not an import "
+            f"path to a model class ('module.path:ClassName'): {error}"
+        ) from error
+
+    base = _subclasses_one_of(model_class, by_model)
+    if base is None:
+        raise ValueError(
+            f"Model class {model_class!r} derives from none of {list(by_model)}, so there is no "
+            "config to read its settings into. Subclass one of them."
+        )
+    return by_model[base]
+
+
+def _model_config_from_dict(cfg: dict[str, Any]) -> ModelConfig:
+    """Build the model config for the ``class_name`` in the given dictionary.
+
+    Args:
+        cfg: Model configuration dictionary. ``class_name`` defaults to ``"MLPModel"``.
+
+    Returns:
+        The config :func:`_model_config_class` selects, read from the dictionary.
+
+    Raises:
+        ValueError: If ``class_name`` names no known model, or the dictionary configures a CNN
+            encoder for a model that is not a CNN.
     """
     class_name = cfg.get("class_name", "MLPModel")
-    if callable(class_name):
-        class_name = getattr(class_name, "__name__", "MLPModel")
-    simple_name = str(class_name).split(":")[-1].split(".")[-1]
-    config_cls = CNNConfig if simple_name == "CNNModel" or "cnn_cfg" in cfg else MLPConfig
+    config_cls = _model_config_class(class_name)
+    if "cnn_cfg" in cfg and config_cls is not CNNConfig:
+        raise ValueError(
+            f"'cnn_cfg' configures a CNN encoder, but class_name {class_name!r} is not a CNN "
+            "model. Set class_name to CNNModel, or remove cnn_cfg."
+        )
     return config_cls.from_dict(cfg)
 
 
@@ -208,8 +269,9 @@ class BaseConfig:
     def _check_class_name(self) -> None:
         """Validate ``class_name`` against the classes this config can configure.
 
-        Fully qualified names such as ``"rlbotics.algorithms:PPO"`` are accepted, so a custom
-        subclass can be named. A class or factory passed directly is accepted as-is, since the
+        Fully qualified names such as ``"rlbotics.algorithms:PPO"`` are accepted, and so is an
+        import path to a subclass of an accepted class (``"my_pkg.models:MyModel"``), which is
+        imported to check it. A class or factory passed directly is accepted as-is, since the
         caller has already resolved it.
 
         Raises:
@@ -227,11 +289,21 @@ class BaseConfig:
                 f"{type(self).__name__}.class_name must be a non-empty string or a callable, got "
                 f"{name!r}."
             )
-        if name.split(":")[-1].split(".")[-1] not in expected:
+        if name.split(":")[-1].split(".")[-1] in expected:
+            return
+
+        # Otherwise it may be an import path to a custom subclass, such as "my_pkg.models:MyModel"
+        from telekinesis.rlbotics.utils import resolve_callable  # pulls in torch, so only here
+
+        try:
+            resolved = resolve_callable(name)
+        except (ImportError, AttributeError, TypeError):
+            resolved = None
+        if _subclasses_one_of(resolved, expected) is None:
             raise ValueError(
                 f"{type(self).__name__}.class_name must name one of {list(expected)}, optionally "
-                f"qualified with its"
-                f" module, or be the class itself. Got '{name}'."
+                f"qualified with its module, be an import path to a subclass of one, or be the "
+                f"class itself. Got '{name}'."
             )
 
 
@@ -331,6 +403,53 @@ class MLPConfig(BaseConfig):
 
         if isinstance(self.distribution_cfg, dict):
             self.distribution_cfg = GaussianDistributionConfig.from_dict(self.distribution_cfg)
+
+
+@dataclass
+class SimBaConfig(MLPConfig):
+    """Configuration for :class:`~rlbotics.models.SimBaModel`, a point-cloud SimBa network.
+
+    The model reads one flat vector whose first ``point_dim`` entries are a flattened point cloud and
+    whose remainder is proprioception. The points go through an MLP encoder; the encoding and the
+    proprioception are concatenated, projected to ``hidden_dim`` and passed through ``num_blocks``
+    pre-LayerNorm residual blocks (SimBa, Lee et al. 2024) before a LayerNorm and a linear head.
+    This is the network of AlphaNIST (Fig. 3) for contact-rich assembly.
+
+    ``hidden_dims`` and ``activation`` are inherited but unused. ``obs_normalization`` normalizes the
+    proprioception only: the points are already in a fixed, scaled frame.
+
+    Attributes:
+        class_name: Model class to instantiate, as a name or the class itself.
+        point_dim: Number of leading inputs that are the flattened point cloud (3 x points).
+        encoder_dims: Hidden sizes of the point encoder, each followed by ELU.
+        hidden_dim: Width of the residual stream.
+        expansion: Inner width of each residual block.
+        num_blocks: Number of residual blocks.
+        head_gain: Orthogonal init gain of the output layer (0.01 for an actor, 1.0 for a critic).
+    """
+
+    expected_class_names: ClassVar[tuple[str, ...]] = ("SimBaModel",)
+
+    class_name: str | Callable = "SimBaModel"
+    point_dim: int = 960
+    encoder_dims: tuple[int, ...] | list[int] = (256, 128)
+    hidden_dim: int = 256
+    expansion: int = 1024
+    num_blocks: int = 2
+    head_gain: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Validate the SimBa settings on top of the inherited MLP checks.
+
+        Raises:
+            ValueError: If any setting is invalid.
+        """
+        super().__post_init__()
+        for name in ("point_dim", "hidden_dim", "expansion", "num_blocks"):
+            _check_positive(name, getattr(self, name))
+        if len(self.encoder_dims) == 0 or any(d <= 0 for d in self.encoder_dims):
+            raise ValueError(f"'encoder_dims' must be a non-empty list of positive sizes, got {self.encoder_dims}.")
+        _check_positive("head_gain", self.head_gain)
 
 
 @dataclass
@@ -445,6 +564,14 @@ class CNNConfig(MLPConfig):
                     else CNNEncoderConfig.from_dict(cfg)
                     for group, cfg in self.cnn_cfg.items()
                 }
+
+
+# The model config classes. Each names the model it configures in expected_class_names, and those
+# names are the keys of models.MODELS, so a new model is one entry here and one there.
+ModelConfig = MLPConfig | SimBaConfig | CNNConfig
+"""Any model config. Each configures the model its expected_class_names names."""
+
+MODEL_CONFIGS: tuple[type[ModelConfig], ...] = (MLPConfig, SimBaConfig, CNNConfig)
 
 
 @dataclass
@@ -713,10 +840,10 @@ class OnPolicyRunnerConfig(BaseConfig):
     torch_compile_mode: str | None = None
     logger: LoggerConfig = field(default_factory=LoggerConfig)
     algorithm: PPOConfig = field(default_factory=PPOConfig)
-    actor: MLPConfig | CNNConfig = field(
+    actor: ModelConfig = field(
         default_factory=lambda: MLPConfig(distribution_cfg=GaussianDistributionConfig())
     )
-    critic: MLPConfig | CNNConfig = field(default_factory=MLPConfig)
+    critic: ModelConfig = field(default_factory=MLPConfig)
 
     def __post_init__(self) -> None:
         """Validate the runner settings and coerce nested dictionaries into configs.
@@ -725,9 +852,10 @@ class OnPolicyRunnerConfig(BaseConfig):
             ValueError: If any setting is invalid, if ``obs_groups`` is empty or maps a set to an
                 empty list, or if the actor has no ``distribution_cfg``.
         """
-        # Not routed through the shared _check_class_name(): that rejects anything outside a fixed
-        # set of names, which is right for a config with one built-in implementation (PPOConfig,
-        # MLPConfig, ...) but wrong here, where the whole point is that RUNNERS keeps growing.
+        # Not routed through the shared _check_class_name(): that only accepts the config's own
+        # class names or subclasses of them, which is right for a config with fixed built-in
+        # implementations (PPOConfig, the model configs) but wrong here, where the whole point is
+        # that RUNNERS keeps growing with runners that need not share a base class.
         if not callable(self.class_name) and not (isinstance(self.class_name, str) and self.class_name):
             raise ValueError(
                 f"'class_name' must be a non-empty string or a callable, got {self.class_name!r}."
@@ -765,6 +893,12 @@ class OnPolicyRunnerConfig(BaseConfig):
             self.actor = _model_config_from_dict(self.actor)
         if isinstance(self.critic, dict):
             self.critic = _model_config_from_dict(self.critic)
+        for role in ("actor", "critic"):
+            if not isinstance(getattr(self, role), MODEL_CONFIGS):
+                raise ValueError(
+                    f"'{role}' must be a model config ({', '.join(c.__name__ for c in MODEL_CONFIGS)})"
+                    f" or a dictionary of one, got {type(getattr(self, role)).__name__}."
+                )
 
         if self.actor.distribution_cfg is None:
             raise ValueError(

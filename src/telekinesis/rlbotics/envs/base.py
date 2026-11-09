@@ -70,7 +70,13 @@ class VecEnv(ABC):
             dones: Tensor of shape (num_envs,) with done flags (True if episode terminated).
             extras: Dictionary with extra information including:
                 - "time_outs": Tensor of shape (num_envs,) indicating time limit terminations.
-                - "log": Dictionary with logging information.
+                - "log": Dictionary with logging information. Each value is a scalar the
+                  environment has already reduced, and the logger averages it over the steps of an
+                  iteration that report it.
+                - "episode": Optional dictionary of per-episode metrics, each a tensor of shape
+                  (num_envs,) read only where ``dones`` is set (a success flag, a final distance).
+                  The logger averages it over the episodes that ended, skipping NaN, so it is
+                  exact where "log" is an average of per-step averages.
         """
         raise NotImplementedError
 

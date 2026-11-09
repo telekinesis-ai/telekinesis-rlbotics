@@ -15,7 +15,7 @@ from loguru import logger
 from tensordict import TensorDict
 
 from telekinesis.rlbotics.config import PPOConfig
-from telekinesis.rlbotics.models import CNNModel, MLPModel
+from telekinesis.rlbotics.models import Model
 from telekinesis.rlbotics.rollout import RolloutBuffer, Transition
 from telekinesis.rlbotics.symmetry import Symmetry
 
@@ -34,17 +34,17 @@ class PPO:
         - Schulman et al. "Proximal policy optimization algorithms." arXiv preprint arXiv:1707.06347 (2017).
     """
 
-    actor: MLPModel | CNNModel
+    actor: Model
     """The actor model."""
 
-    critic: MLPModel | CNNModel
+    critic: Model
     """The critic model."""
 
     def __init__(
         self,
         cfg: PPOConfig,
-        actor: MLPModel | CNNModel,
-        critic: MLPModel | CNNModel,
+        actor: Model,
+        critic: Model,
         storage: RolloutBuffer,
         obs_groups: dict[str, list[str]] | None = None,
         device: str = "cpu",
@@ -446,7 +446,7 @@ class PPO:
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
         return load_cfg.get("iteration", False)
 
-    def get_policy(self) -> MLPModel:
+    def get_policy(self) -> Model:
         """Get the policy model."""
         return self._raw_actor
 

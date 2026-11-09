@@ -79,7 +79,9 @@ def test_config_builds_a_runner_config(path):
     assert cfg.num_steps_per_env == runner["num_steps_per_env"]
     assert cfg.num_learning_iterations == runner["num_learning_iterations"]
     assert cfg.algorithm.learning_rate == runner["algorithm"]["learning_rate"]
-    assert cfg.actor.hidden_dims == runner["actor"]["hidden_dims"]
+    # Not every model has an MLP trunk (SimBaModel sizes itself with its own fields)
+    if "hidden_dims" in runner["actor"]:
+        assert cfg.actor.hidden_dims == runner["actor"]["hidden_dims"]
 
 
 @pytest.mark.parametrize("path", config_files(), ids=config_id)

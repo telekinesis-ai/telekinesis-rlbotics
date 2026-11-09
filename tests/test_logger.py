@@ -99,6 +99,55 @@ class TestProcessEnvStep:
         assert len(logger.episode_info_buffer) == 1
         assert logger.episode_info_buffer[0]["goal_reached"] is True
 
+    def test_episode_metrics_are_averaged_over_ended_episodes(self):
+        """Test that per-episode metrics count each ended episode once, whatever step it ended on.
+
+        Averaging per step instead would weight the step where one episode ended as much as the
+        step where three did, giving (1/1 + 0/3) / 2 = 0.5 here rather than the true 1/4.
+        """
+        logger = Logger(LoggerConfig(log_dir=None), num_envs=4, device="cpu")
+
+        # Only env 0 ends and it succeeds; the others' values are ignored because they did not end
+        logger.process_env_step(
+            torch.zeros(4), torch.tensor([1.0, 0, 0, 0]), None, {"success": torch.tensor([1.0, 1, 1, 1])}
+        )
+        # Three end and fail
+        logger.process_env_step(
+            torch.zeros(4), torch.tensor([0, 1.0, 1, 1]), None, {"success": torch.zeros(4)}
+        )
+
+        assert logger._mean_episode_metrics() == {"success": 0.25}
+
+    def test_episode_metrics_skip_nan_and_clear_each_iteration(self):
+        """Test that an environment reporting NaN is left out, and a key nobody reported is not logged."""
+        logger = Logger(LoggerConfig(log_dir=None), num_envs=2, device="cpu")
+
+        logger.process_env_step(
+            torch.zeros(2), torch.ones(2), None, {"distance": torch.tensor([0.5, float("nan")])}
+        )
+        assert logger._mean_episode_metrics() == {"distance": 0.5}
+
+        # Cleared by the read, and an iteration with no ended episode reports nothing
+        logger.process_env_step(torch.zeros(2), torch.zeros(2), None, {"distance": torch.ones(2)})
+        assert logger._mean_episode_metrics() == {}
+
+    def test_episode_metric_of_the_wrong_size_is_rejected(self):
+        """Test that a metric without one value per environment fails rather than broadcasting."""
+        logger = Logger(LoggerConfig(log_dir=None), num_envs=4, device="cpu")
+
+        with pytest.raises(ValueError, match="expected one per environment"):
+            logger.process_env_step(torch.zeros(4), torch.ones(4), None, {"success": torch.ones(2)})
+
+    def test_episode_metrics_are_printed(self, capsys):
+        """Test that log() reports the iteration's per-episode metrics."""
+        logger = Logger(LoggerConfig(log_dir=None, log_interval=1), num_envs=2, device="cpu")
+
+        logger.process_env_step(torch.zeros(2), torch.ones(2), None, {"success": torch.tensor([1.0, 0.0])})
+        logger.log(iteration=1, total_iterations=1)
+
+        assert "Episode success:" in capsys.readouterr().out
+        assert logger._episode_metric_sums == {}
+
     def test_reward_buffer_maxlen(self):
         """Test that reward buffer respects maxlen."""
         logger = Logger(LoggerConfig(log_dir=None), num_envs=1, device="cpu")

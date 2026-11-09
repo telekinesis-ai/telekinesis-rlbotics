@@ -96,14 +96,25 @@ def _load_isaaclab():
     """Import the Isaac Lab pieces this adapter needs.
 
     Deferred on purpose: these modules only import once Isaac Sim is running. Importing
-    ``isaaclab_tasks`` is also what registers the tasks.
+    ``isaaclab_tasks`` is also what registers the built-in tasks. Tasks from other packages are
+    found through the ``isaaclab.tasks`` entry-point group, a convention of this adapter rather
+    than of Isaac Lab: each entry point names a module whose import registers its tasks with
+    Gymnasium, and it can only be imported here, once Isaac Sim is running.
 
     Returns:
         Gymnasium and ``parse_env_cfg``.
     """
+    from importlib.metadata import entry_points
+
     import gymnasium as gym
     import isaaclab_tasks  # noqa: F401
     from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+
+    for entry_point in entry_points(group="isaaclab.tasks"):
+        try:
+            entry_point.load()
+        except Exception as error:  # a broken plugin should not take the built-in tasks down with it
+            logger.warning(f"   Could not load Isaac Lab tasks from '{entry_point.value}': {error}")
 
     return gym, parse_env_cfg
 

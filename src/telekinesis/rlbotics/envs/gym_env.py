@@ -25,6 +25,15 @@ except ImportError as error:  # pragma: no cover - depends on the environment
 
 INSTALL_HINT = 'Install it with: pip install "telekinesis-rlbotics[gym]"'
 
+EPISODE_METRICS_KEY = "episode_metrics"
+"""The ``infos`` entry a task reports per-episode metrics under, forwarded as ``extras["episode"]``.
+
+Its value is a dictionary of per-environment arrays, read only where an episode ends (a success
+flag, a final distance). Gymnasium's vectorizers merge each sub-environment's dictionary into this
+shape on their own, adding a ``_<key>`` mask for the environments that reported the key, and a
+custom vector environment builds it directly.
+"""
+
 
 class GymnasiumVecEnv(VecEnv):
     """Presents a Gymnasium vector environment as a :class:`VecEnv`.
@@ -64,15 +73,8 @@ class GymnasiumVecEnv(VecEnv):
                 f"GymnasiumVecEnv needs Gymnasium, which is not installed. {INSTALL_HINT}"
             ) from GYMNASIUM_IMPORT_ERROR
 
-        # SAME_STEP autoreset keeps every step a real transition, which is what the rollout expects
         try:
-            self.venv = gym.make_vec(
-                env_id,
-                num_envs=num_envs,
-                vectorization_mode="sync",
-                render_mode=render_mode,
-                vector_kwargs={"autoreset_mode": gym.vector.AutoresetMode.SAME_STEP},
-            )
+            self.venv = self._make_vec(env_id, num_envs, render_mode)
         except gym.error.DependencyNotInstalled as error:
             # MuJoCo and Box2D tasks each pull in their own physics engine
             raise ImportError(
@@ -91,6 +93,59 @@ class GymnasiumVecEnv(VecEnv):
         self.max_episode_length = gym.spec(env_id).max_episode_steps or 1000
         self.action_low, self.action_high = self._action_bounds(env_id, action_space)
         self.obs = self._to_tensor(self.venv.reset(seed=0)[0])
+
+    @staticmethod
+    def _make_vec(env_id: str, num_envs: int, render_mode: str | None) -> gym.vector.VectorEnv:
+        """Build the vector environment, natively batched if the task registers a vector entry point.
+
+        A task that simulates its environments as one batch (a GPU or multithreaded simulator)
+        registers ``vector_entry_point``, and is built through it rather than as ``num_envs`` copies
+        stepped one by one. Every other task is wrapped in a synchronous vector environment.
+
+        Either way the environments must autoreset on the same step they end, which keeps every
+        step a real transition, as the rollout expects. Gymnasium accepts no ``vector_kwargs`` for
+        a vector entry point, so such a task has to declare that mode in its metadata itself. One
+        that does not (Gymnasium's own CartPole, say, which resets on the next step) is built
+        synchronously from its single-environment entry point instead.
+
+        Args:
+            env_id: Gymnasium environment id.
+            num_envs: Number of parallel environments.
+            render_mode: Passed straight to Gymnasium, and only when set, so a vector entry point
+                that does not render need not accept it.
+
+        Returns:
+            The vector environment.
+
+        Raises:
+            ValueError: If a task registers only a vector entry point, and it does not autoreset
+                on the same step.
+        """
+        render = {} if render_mode is None else {"render_mode": render_mode}
+        spec = gym.spec(env_id)
+        if spec.vector_entry_point is not None:
+            venv = gym.make_vec(
+                env_id, num_envs=num_envs, vectorization_mode="vector_entry_point", **render
+            )
+            mode = venv.metadata.get("autoreset_mode")
+            if mode == gym.vector.AutoresetMode.SAME_STEP:
+                return venv
+            venv.close()
+            if spec.entry_point is None:
+                raise ValueError(
+                    f"'{env_id}' is a vector environment with autoreset mode {mode}, and only "
+                    "SAME_STEP is supported: the rollout expects every step to be a real "
+                    'transition. Declare metadata["autoreset_mode"] = '
+                    "gym.vector.AutoresetMode.SAME_STEP."
+                )
+
+        return gym.make_vec(
+            env_id,
+            num_envs=num_envs,
+            vectorization_mode="sync",
+            vector_kwargs={"autoreset_mode": gym.vector.AutoresetMode.SAME_STEP},
+            **render,
+        )
 
     @staticmethod
     def _check_spaces(env_id: str, action_space: gym.Space, obs_space: gym.Space) -> None:
@@ -215,15 +270,49 @@ class GymnasiumVecEnv(VecEnv):
             scaled = self.action_low + 0.5 * (actions.clamp(-1.0, 1.0) + 1.0) * (
                 self.action_high - self.action_low
             )
-        obs, rewards, terminated, truncated, _ = self.venv.step(scaled.detach().cpu().numpy())
+        obs, rewards, terminated, truncated, infos = self.venv.step(scaled.detach().cpu().numpy())
 
         self.obs = self._to_tensor(obs)
+        extras = {"time_outs": torch.as_tensor(truncated, dtype=torch.bool, device=self.device)}
+        metrics = self._episode_metrics(infos)
+        if metrics:
+            extras["episode"] = metrics
         return (
             self._observations(),
             self._to_tensor(rewards),
             self._to_tensor(terminated | truncated),
-            {"time_outs": torch.as_tensor(truncated, dtype=torch.bool, device=self.device)},
+            extras,
         )
+
+    def _episode_metrics(self, infos: dict) -> dict[str, torch.Tensor]:
+        """Read the task's per-episode metrics out of a step's ``infos``.
+
+        Only the :data:`EPISODE_METRICS_KEY` entry is read, so a task decides what is a metric
+        rather than every number it puts in ``infos`` (a MuJoCo task's per-step reward terms, say)
+        being logged as one.
+
+        Args:
+            infos: The vector environment's ``infos`` for this step.
+
+        Returns:
+            One float tensor of shape (num_envs,) per numeric key. An environment that did not
+            report a key on this step holds NaN, which the logger leaves out of the mean.
+        """
+        reported = infos.get(EPISODE_METRICS_KEY)
+        if not reported:
+            return {}
+
+        metrics = {}
+        for key, values in reported.items():
+            values = np.asarray(values)
+            if key.startswith("_") or values.shape != (self.num_envs,) or values.dtype.kind not in "biuf":
+                continue
+            values = values.astype(np.float32)
+            mask = reported.get(f"_{key}")
+            if mask is not None:
+                values = np.where(np.asarray(mask, dtype=bool), values, np.nan)
+            metrics[key] = self._to_tensor(values)
+        return metrics
 
     def render(self):
         """Return the current frame of each sub-environment.
